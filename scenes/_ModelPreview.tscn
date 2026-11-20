@@ -1,0 +1,67 @@
+[gd_scene load_steps=12 format=3]
+
+[ext_resource type="PackedScene" path="res://models/enemies/enemy_grunt.glb" id="1"]
+[ext_resource type="PackedScene" path="res://models/enemies/enemy_runner.glb" id="2"]
+[ext_resource type="PackedScene" path="res://models/enemies/enemy_tank.glb" id="3"]
+[ext_resource type="PackedScene" path="res://models/enemies/enemy_shield.glb" id="4"]
+[ext_resource type="PackedScene" path="res://models/enemies/enemy_healer.glb" id="5"]
+[ext_resource type="PackedScene" path="res://models/enemies/enemy_splitter.glb" id="6"]
+[ext_resource type="PackedScene" path="res://models/enemies/enemy_miniboss.glb" id="7"]
+[ext_resource type="PackedScene" path="res://models/enemies/enemy_boss.glb" id="8"]
+
+[sub_resource type="PlaneMesh" id="Plane_1"]
+size = Vector2(120, 120)
+
+[sub_resource type="StandardMaterial3D" id="Mat_ground"]
+albedo_color = Color(0.20, 0.28, 0.19, 1)
+roughness = 0.95
+
+[sub_resource type="Environment" id="Env_1"]
+background_mode = 1
+background_color = Color(0.09, 0.11, 0.16, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.55, 0.60, 0.75, 1)
+ambient_light_energy = 0.12
+
+[node name="ModelPreview" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env_1")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.6069, -0.5730, 0.5507, 0.0000, 0.6930, 0.7210, -0.7948, -0.4376, 0.4206, 0.0000, 12.0000, 0.0000)
+light_energy = 0.80
+shadow_enabled = true
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+mesh = SubResource("Plane_1")
+material_override = SubResource("Mat_ground")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1.0000, 0.0000, 0.0000, 0.0000, 0.6508, 0.7593, 0.0000, -0.7593, 0.6508, 0.0000, 5.8649, 5.4554)
+current = true
+fov = 42.0
+
+[node name="enemy_grunt" parent="." instance=ExtResource("1")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.625, 0, 1.150)
+
+[node name="enemy_runner" parent="." instance=ExtResource("2")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.875, 0, 1.150)
+
+[node name="enemy_tank" parent="." instance=ExtResource("3")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.875, 0, 1.150)
+
+[node name="enemy_shield" parent="." instance=ExtResource("4")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.625, 0, 1.150)
+
+[node name="enemy_healer" parent="." instance=ExtResource("5")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.625, 0, -1.150)
+
+[node name="enemy_splitter" parent="." instance=ExtResource("6")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.875, 0, -1.150)
+
+[node name="enemy_miniboss" parent="." instance=ExtResource("7")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.875, 0, -1.150)
+
+[node name="enemy_boss" parent="." instance=ExtResource("8")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.625, 0, -1.150)

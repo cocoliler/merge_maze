@@ -1,0 +1,14 @@
+# Godot 4 编辑器缓存（导入产物、着色器缓存、脚本类缓存等，全部可重新生成）
+.godot/
+
+# godot_ai 插件的运行时热更新缓存（自动生成）
+addons/.godot_ai_update/
+
+# 导出配置与产物（每台机器路径不同，不入库）
+export_presets.cfg
+*.translation
+*.tmp
+
+# 系统 / 编辑器杂物
+.DS_Store
+Thumbs.db

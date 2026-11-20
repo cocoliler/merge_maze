@@ -1,0 +1,123 @@
+[gd_scene load_steps=26 format=3]
+
+[ext_resource type="PackedScene" path="res://models/towers/tower_arrow_l1.glb" id="1"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_cannon_l1.glb" id="2"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_frost_l1.glb" id="3"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_sniper_l1.glb" id="4"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_tesla_l1.glb" id="5"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_flame_l1.glb" id="6"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_bounce_l1.glb" id="7"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_arrow_l2.glb" id="8"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_cannon_l2.glb" id="9"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_frost_l2.glb" id="10"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_sniper_l2.glb" id="11"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_tesla_l2.glb" id="12"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_flame_l2.glb" id="13"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_bounce_l2.glb" id="14"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_arrow_l3.glb" id="15"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_cannon_l3.glb" id="16"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_frost_l3.glb" id="17"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_sniper_l3.glb" id="18"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_tesla_l3.glb" id="19"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_flame_l3.glb" id="20"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_bounce_l3.glb" id="21"]
+[ext_resource type="PackedScene" path="res://models/towers/tower_cannon_l3_twin.glb" id="22"]
+
+[sub_resource type="PlaneMesh" id="Plane_1"]
+size = Vector2(120, 120)
+
+[sub_resource type="StandardMaterial3D" id="Mat_ground"]
+albedo_color = Color(0.22, 0.26, 0.20, 1)
+roughness = 0.95
+
+[sub_resource type="Environment" id="Env_1"]
+background_mode = 1
+background_color = Color(0.09, 0.11, 0.16, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.55, 0.60, 0.75, 1)
+ambient_light_energy = 0.12
+
+[node name="ModelPreview" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env_1")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.6069, -0.5730, 0.5507, 0.0000, 0.6930, 0.7210, -0.7948, -0.4376, 0.4206, 0.0000, 12.0000, 0.0000)
+light_energy = 0.80
+shadow_enabled = true
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+mesh = SubResource("Plane_1")
+material_override = SubResource("Mat_ground")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1.0000, 0.0000, 0.0000, 0.0000, 0.6508, 0.7593, 0.0000, -0.7593, 0.6508, 0.0000, 17.4854, 13.0155)
+current = true
+fov = 40.0
+
+[node name="tower_arrow_l1" parent="." instance=ExtResource("1")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9.600, 0, 7.800)
+
+[node name="tower_cannon_l1" parent="." instance=ExtResource("2")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6.400, 0, 7.800)
+
+[node name="tower_frost_l1" parent="." instance=ExtResource("3")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3.200, 0, 7.800)
+
+[node name="tower_sniper_l1" parent="." instance=ExtResource("4")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.000, 0, 7.800)
+
+[node name="tower_tesla_l1" parent="." instance=ExtResource("5")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3.200, 0, 7.800)
+
+[node name="tower_flame_l1" parent="." instance=ExtResource("6")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6.400, 0, 7.800)
+
+[node name="tower_bounce_l1" parent="." instance=ExtResource("7")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 9.600, 0, 7.800)
+
+[node name="tower_arrow_l2" parent="." instance=ExtResource("8")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8.000, 0, 2.600)
+
+[node name="tower_cannon_l2" parent="." instance=ExtResource("9")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.800, 0, 2.600)
+
+[node name="tower_frost_l2" parent="." instance=ExtResource("10")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.600, 0, 2.600)
+
+[node name="tower_sniper_l2" parent="." instance=ExtResource("11")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.600, 0, 2.600)
+
+[node name="tower_tesla_l2" parent="." instance=ExtResource("12")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.800, 0, 2.600)
+
+[node name="tower_flame_l2" parent="." instance=ExtResource("13")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8.000, 0, 2.600)
+
+[node name="tower_bounce_l2" parent="." instance=ExtResource("14")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 11.200, 0, 2.600)
+
+[node name="tower_arrow_l3" parent="." instance=ExtResource("15")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9.600, 0, -2.600)
+
+[node name="tower_cannon_l3" parent="." instance=ExtResource("16")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6.400, 0, -2.600)
+
+[node name="tower_frost_l3" parent="." instance=ExtResource("17")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3.200, 0, -2.600)
+
+[node name="tower_sniper_l3" parent="." instance=ExtResource("18")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.000, 0, -2.600)
+
+[node name="tower_tesla_l3" parent="." instance=ExtResource("19")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3.200, 0, -2.600)
+
+[node name="tower_flame_l3" parent="." instance=ExtResource("20")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6.400, 0, -2.600)
+
+[node name="tower_bounce_l3" parent="." instance=ExtResource("21")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 9.600, 0, -2.600)
+
+[node name="tower_cannon_l3_twin" parent="." instance=ExtResource("22")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8.000, 0, -7.800)

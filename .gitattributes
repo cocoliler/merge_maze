@@ -1,0 +1,11 @@
+# 统一换行：文本走 LF，二进制不参与换行转换（避免 Windows 上满屏 "LF will be replaced by CRLF"）
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.glb binary
+*.ttf binary
+*.otf binary
+*.wav binary

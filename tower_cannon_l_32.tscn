@@ -1,0 +1,5 @@
+[gd_scene format=3 uid="uid://c3wh1bytw3dka"]
+
+[ext_resource type="PackedScene" uid="uid://cuilhor5iae0f" path="res://models/towers/tower_cannon_l3.glb" id="1_doumx"]
+
+[node name="tower_cannon_l32" unique_id=1287161895 instance=ExtResource("1_doumx")]
