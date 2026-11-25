@@ -2,7 +2,7 @@ class_name EnemyData
 ## 敌人数值配置（外置数据文件）。调整血量/速度/奖励/颜色/描述只改这里。
 ## 注意：Kind 枚举顺序需与 Enemy.gd 中的 enum 保持完全一致。
 
-enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS, ICEBREAKER, FROSTWEAVER, FROSTLING }
+enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS, ICEBREAKER, FROSTWEAVER, FROSTLING, SNOWKING }
 
 ## ---------------------------------------------------------------- 首领专属技能
 ## 技能逻辑在 Enemy._tick_boss_skill() 里，这里只管数值 —— 想调强度只改下面这些常量。
@@ -30,6 +30,18 @@ const BOSS_PULSE_TIME := 1.5
 ## 大首领 · 狂暴（半血时一次性）：移速 +BOSS_ENRAGE_HASTE、护甲 +BOSS_ENRAGE_ARMOR。
 const BOSS_ENRAGE_HASTE := 0.35
 const BOSS_ENRAGE_ARMOR := 0.10
+
+## 雪人王「雪球」：每隔 SNOWBALL_INTERVAL 秒挑一座射程内的塔丢一颗雪球，
+## 命中后那座塔攻速 ×(1 − SNOWBALL_SLOW)、持续 SNOWBALL_TIME 秒（塔不会被摧毁）。
+## 半血后间隔 ×SNOWBALL_ENRAGE_COEF —— 雪人王不会狂暴冲锋，它改用「更密的雪球」施压。
+const SNOWBALL_INTERVAL := 6.0
+const SNOWBALL_RANGE := 8.5
+const SNOWBALL_SLOW := 0.35
+const SNOWBALL_TIME := 5.0
+const SNOWBALL_ENRAGE_COEF := 0.6
+const SNOWBALL_SPEED := 9.0
+const SNOWBALL_ARC := 1.3
+const SNOWBALL_SUMMON := 2
 
 ## ---------------------------------------------------------------- 霜语者的冰甲
 ## 每 ICE_ARMOR_INTERVAL 秒，给 ICE_ARMOR_RADIUS 内的同伴套一层吸收伤害的护盾。
@@ -67,4 +79,9 @@ const DATA := {
 	# underwater = 能走水下段，但**自己砸不开冰面** —— 要等碎冰者先把湖凿穿，
 	# 它才跟着冰洞游过去；冰面没通时老老实实沿雪径绕湖。
 	Kind.FROSTLING: {"name": "霜崽", "hp": 52.0, "speed": 2.90, "reward": 11, "color": Color(1.0, 1.0, 1.0), "size": 1.05, "flying": false, "armor": 0.0, "heal": 0.0, "split": 0, "cloak": false, "underwater": true, "desc": "冰原小怪：体型小、跑得快；碎冰者凿穿冰面后，它会跟着从冰洞底下游过去抄近路"},
+	# 第二张图的压轴 Boss（第 10 波）。外观是**程序化 3D 造型**（scripts/SnowkingModel.gd），
+	# 不是原画精灵：造型刻意改造过（冰晶王冠 / 六棱冰甲 / 胸口冰核 / 单手蓄力雪球），别再把原画贴上去。
+	# 和「大首领」的区别：它不砸塔、不脉冲熄火，而是**往炮塔丢雪球压攻速** ——
+	# 塔不会被拆，但被砸中的那几秒输出会明显变慢，逼玩家把塔散开摆、别全挤在湖岸。
+	Kind.SNOWKING: {"name": "雪人王", "hp": 1700.0, "speed": 0.95, "reward": 240, "color": Color(0.90, 0.94, 1.0), "size": 2.90, "flying": false, "armor": 0.15, "heal": 0.0, "split": 0, "cloak": false, "slow_cap": 0.4, "snowball": true, "desc": "霜渊的压轴首领：血量高、护甲减免 15%。技能①雪球：每 6 秒朝射程内的一座塔扔雪球，命中后那座塔攻速 −35%、持续 5 秒（塔不会被摧毁）；技能②暴雪：半血后雪球间隔缩短到 60%，并召唤 2 只霜崽"},
 }

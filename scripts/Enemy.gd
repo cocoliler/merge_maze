@@ -3,7 +3,7 @@ class_name Enemy
 ## 敌人：沿 GameGrid 生成的固定路线行进，支持减速、血条、漏怪扣血。
 ## 固定路线下建塔不会改变行进路径，所以战斗中不再重算；repath() 仅作兜底保留。
 
-enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS, ICEBREAKER, FROSTWEAVER, FROSTLING }
+enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS, ICEBREAKER, FROSTWEAVER, FROSTLING, SNOWKING }
 
 const DATA := EnemyData.DATA
 
@@ -262,7 +262,7 @@ func _init_enemy(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scal
 ## 精英词条：随波次概率给非首领敌人挂随机强化
 func _roll_elites(wave: int) -> void:
 	# 首领不吃随机精英词条：它们本身就是被设计好的强度节点
-	if kind == Kind.BOSS or kind == Kind.MINI_BOSS:
+	if is_boss():
 		return
 	var chance := clampf(0.06 + 0.035 * float(wave - 1), 0.0, 0.45)
 	if randf() > chance:
@@ -304,9 +304,9 @@ func _apply_elites() -> void:
 ## 大首领靠压制脉冲打断防线、半血狂暴决定战斗的后半段节奏。
 ## 数值全在 EnemyData 里，这里只负责表现与结算。
 
-## 首领是「有技能的那两只」
+## 首领是「有技能的那三只」：小首领（战吼 / 集结）、大首领（脉冲 / 狂暴）、雪人王（雪球 / 暴雪）
 func is_boss() -> bool:
-	return kind == Kind.BOSS or kind == Kind.MINI_BOSS
+	return kind == Kind.BOSS or kind == Kind.MINI_BOSS or kind == Kind.SNOWKING
 
 
 ## 第一次放技能的延迟：首领登场先走一小段，给玩家一点反应时间
@@ -315,6 +315,8 @@ func _first_skill_delay() -> float:
 		return float(EnemyData.WARCRY_INTERVAL) * 0.6
 	if kind == Kind.BOSS:
 		return float(EnemyData.BOSS_PULSE_INTERVAL) * 0.5
+	if kind == Kind.SNOWKING:
+		return float(EnemyData.SNOWBALL_INTERVAL) * 0.5
 	return 0.0
 
 
@@ -344,9 +346,54 @@ func _tick_boss_skill(delta: float) -> void:
 	if kind == Kind.MINI_BOSS:
 		_skill_timer = float(EnemyData.WARCRY_INTERVAL)
 		_warcry()
+	elif kind == Kind.SNOWKING:
+		_skill_timer = snowball_interval()
+		_throw_snowball()
 	else:
 		_skill_timer = float(EnemyData.BOSS_PULSE_INTERVAL)
 		_pulse()
+
+
+## 雪球冷却：半血「暴雪」之后砸得更勤
+func snowball_interval() -> float:
+	var base := float(EnemyData.SNOWBALL_INTERVAL)
+	if _enraged:
+		base *= float(EnemyData.SNOWBALL_ENRAGE_COEF)
+	return base
+
+
+## 雪人王「雪球」：朝射程内**等级最高**的一座塔扔一颗雪球（同等级取最近的）。
+## 为什么挑等级最高的：压攻速的价值和这座塔的输出成正比 —— 砸满级塔才有意义，
+## 砸一座刚建的一级塔等于白扔；而且这样玩家能读懂「它在针对我的主力塔」。
+## 射程内没有塔就只做一次抬手动作，1 秒后重试，不把 6 秒冷却浪费掉。
+func _throw_snowball() -> void:
+	var radius := float(EnemyData.SNOWBALL_RANGE)
+	var best = null
+	var best_score := -1.0
+	for t in get_tree().get_nodes_in_group("towers"):
+		if t == null or not is_instance_valid(t):
+			continue
+		var d: float = t.global_position.distance_to(global_position)
+		if d > radius:
+			continue
+		# 先比等级，再比远近（近的略优先）
+		var score: float = float(t.level) * 100.0 - d
+		if score > best_score:
+			best_score = score
+			best = t
+	var parent := get_parent()
+	if best == null:
+		_skill_timer = 1.0
+		Fx.ring(parent, global_position, Color(0.72, 0.92, 1.0), 1.2, 0.35)
+		return
+	# 抬手：一圈冷光 + 手部闪光，然后才是雪球飞出去
+	Fx.flash(parent, global_position + Vector3(0.0, _body_h * 0.75, 0.0), Color(0.80, 0.95, 1.0), 1.1, 0.28)
+	Sound.play("hit", -12.0)
+	var ball := Snowball.new()
+	ball.name = "Snowball"
+	parent.add_child(ball)
+	ball.launch(best, global_position + Vector3(0.0, _body_h * 0.75, 0.0),
+		float(EnemyData.SNOWBALL_SLOW), float(EnemyData.SNOWBALL_TIME))
 
 
 ## 小首领「潮主」· 战吼：半径内的小怪集体加速，逼玩家先处理首领
@@ -394,6 +441,15 @@ func _on_half_hp() -> void:
 		Fx.damage_number(parent, global_position + Vector3(0.0, 2.9, 0.0), "狂暴", Color(1.0, 0.35, 0.35), true)
 		Sound.play("wave")
 		_summon_guards(int(EnemyData.BOSS_SUMMON))
+	elif kind == Kind.SNOWKING:
+		# 雪人王半血「暴雪」：雪球冷却缩短到 60%，并叫 2 只霜崽上来帮忙
+		_enraged = true
+		_update_tint()
+		Fx.flash(parent, global_position + Vector3(0.0, 1.8, 0.0), Color(0.72, 0.92, 1.0), 2.4, 0.5)
+		Fx.ring(parent, global_position, Color(0.60, 0.88, 1.0), 3.8, 0.7)
+		Fx.damage_number(parent, global_position + Vector3(0.0, 3.0, 0.0), "暴雪", Color(0.70, 0.92, 1.0), true)
+		Sound.play("wave")
+		_summon_guards(int(EnemyData.SNOWBALL_SUMMON), Kind.FROSTLING)
 	else:
 		Fx.ring(parent, global_position, Color(1.0, 0.55, 0.25), 2.6, 0.5)
 		Fx.damage_number(parent, global_position + Vector3(0.0, 1.8, 0.0), "集结", Color(1.0, 0.72, 0.35), false)
@@ -401,7 +457,8 @@ func _on_half_hp() -> void:
 
 
 ## 召唤援军：复用「剩余路径」逻辑（和分裂怪同一套），保证召唤物顺着原路线走
-func _summon_guards(count: int) -> void:
+## spawn_kind 默认是小兵；雪人王叫的是霜崽（冰原杂兵，才会跟得上冰面）
+func _summon_guards(count: int, spawn_kind: int = Kind.GRUNT) -> void:
 	var parent_node := get_parent()
 	if parent_node == null or count <= 0:
 		return
@@ -415,7 +472,7 @@ func _summon_guards(count: int) -> void:
 		parent_node.add_child(e)
 		var ang := TAU * float(i) / float(count)
 		var off := Vector3(cos(ang) * 1.1, 0.0, sin(ang) * 1.1)
-		e._init_enemy(Kind.GRUNT, global_position + off, remaining, hp_scale_v * float(EnemyData.SUMMON_HP_COEF), wave_no, -1)
+		e._init_enemy(spawn_kind, global_position + off, remaining, hp_scale_v * float(EnemyData.SUMMON_HP_COEF), wave_no, -1)
 	Fx.ring(parent_node, global_position, Color(1.0, 0.55, 0.75), 2.2, 0.45)
 
 
@@ -427,8 +484,15 @@ func _build(d: Dictionary) -> void:
 	var col: Color = d["color"]
 	var s: float = float(d["size"])
 
-	# 霜崽用原画精灵（billboard 方片）；贴图没放进来时回退到程序化几何，工程永远能跑
-	var sprite_ok := kind == Kind.FROSTLING and _build_sprite_body(s)
+	# 霜崽用原画精灵（billboard 方片），贴图没放进来时回退到程序化几何，工程永远能跑。
+	# 雪人王是**真 3D 造型**（SnowkingModel），不再用那张像素原画 —— 首领在场上会被绕着看，
+	# 一张正对镜头的方片一转就露馅；3D 造型还能做出王冠 / 冰甲 / 蓄力雪球这些原画没有的改造。
+	var sprite_ok := false
+	if kind == Kind.FROSTLING:
+		sprite_ok = _build_sprite_body(s, "enemy_%s" % slot_suffix(), bool(d.get("pixel", false)))
+	elif kind == Kind.SNOWKING:
+		_build_snowking_body(s)
+		sprite_ok = true
 
 	# 优先用 res://models/enemies/enemy_<类型>.glb（放了模型就不再用程序化几何）
 	if not sprite_ok and not _build_custom_body(s):
@@ -480,15 +544,15 @@ func _build(d: Dictionary) -> void:
 
 	# 首领体型更大，血条同步加宽，远看也能盯住它的血线
 	var bar_w := BAR_WIDTH
-	if kind == Kind.BOSS:
+	if kind == Kind.BOSS or kind == Kind.SNOWKING:
 		bar_w = BAR_WIDTH * 2.0
 	elif kind == Kind.MINI_BOSS:
 		bar_w = BAR_WIDTH * 1.5
 	# 血条离地高度跟着体型走：身体顶面大约在 0.85~1.03 倍体型处，
 	# 1.05*s+0.25 让大小怪的血条都贴着脑袋，不会因为放大而飘到半空。
-	# 霜崽是贴图精灵，头顶就是 _body_h，用同一套公式会飘出去一截。
+	# 贴图精灵（霜崽）/ 3D 造型（雪人王）的头顶就是 _body_h，用同一套公式会飘出去一截。
 	var bar_y := 1.05 * s + 0.25
-	if kind == Kind.FROSTLING:
+	if kind == Kind.FROSTLING or kind == Kind.SNOWKING:
 		bar_y = _body_h + 0.20
 	_build_bar(bar_y, bar_w)
 
@@ -499,6 +563,10 @@ func _build(d: Dictionary) -> void:
 	if kind == Kind.BOSS:
 		_build_boss_ring(s, Color(1.0, 0.22, 0.48))
 		_build_boss_marker(s, Color(1.0, 0.28, 0.52), "BOSS")
+	elif kind == Kind.SNOWKING:
+		# 雪人王：冰蓝光环 + 头顶「BOSS」，和白底雪地也能拉开
+		_build_boss_ring(s, Color(0.42, 0.80, 1.0))
+		_build_boss_marker(s, Color(0.55, 0.86, 1.0), "BOSS")
 	elif kind == Kind.MINI_BOSS:
 		_build_boss_ring(s, Color(1.0, 0.62, 0.22))
 		_build_boss_marker(s, Color(1.0, 0.64, 0.24), "MINI BOSS")
@@ -506,13 +574,29 @@ func _build(d: Dictionary) -> void:
 		_build_elite_ring(s)
 
 
-## 贴图精灵外观：把 res://textures/enemy_frostling.png 贴在一张永远正对镜头的方片上。
-## 为什么不用模型：这张原画是「已经打好光的成品精灵」，贴到球 / 立方体上会被二次打光、
-## 边缘糊成一团；billboard 方片能原样还原，而且只有 1 个 draw call。
+## 雪人王：程序化 3D 造型（组成见 SnowkingModel）。
+## 主雪体材质交给 _mat，减速 / 受击闪白 / 半血「暴雪」沿用同一套染色逻辑；
+## _body_h 必须用实测包围盒，血条和雪球的出手高度都挂在它上面。
+func _build_snowking_body(s: float) -> void:
+	var model := SnowkingModel.build(s)
+	var bm = model.get_meta("body_mat", null)
+	if bm is StandardMaterial3D:
+		_mat = bm as StandardMaterial3D
+		_tint_base = _mat.albedo_color
+	_body_h = ModelLib.height_of(model)
+	if _body_h <= 0.01:
+		_body_h = 1.42 * s
+	_body.add_child(model)
+
+
+## 贴图精灵外观：把 res://textures/<slot>.png 贴在一张永远正对镜头的方片上。
+## 为什么用方片：这类原画是「已经打好光的成品精灵」（霜崽是手绘），
+## 贴到球 / 立方体上会被二次打光、边缘糊成一团；billboard 方片能原样还原，而且只有 1 个 draw call。
 ## 透明用 ALPHA_SCISSOR 而不是 ALPHA：半透明材质会被排进透明队列、不写深度，
 ## 下沉到冰面下的身体会从冰面里透出来（碎冰者那套「完全沉下去」的观感就毁了）。
-func _build_sprite_body(s: float) -> bool:
-	var tex := TextureLib.get_texture("enemy_frostling")
+## pixel = true 时用 NEAREST 采样，像素画放大后不会糊成一团马赛克边。
+func _build_sprite_body(s: float, slot: String, pixel: bool = false) -> bool:
+	var tex := TextureLib.get_texture(slot)
 	if tex == null:
 		return false
 	var h: float = 0.95 * s
@@ -530,6 +614,8 @@ func _build_sprite_body(s: float) -> bool:
 	_mat.alpha_scissor_threshold = 0.45
 	_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if pixel:
+		_mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	quad.material_override = _mat
 	quad.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	# 方片原点在正中：抬到「底边贴地」
@@ -581,6 +667,8 @@ func slot_suffix() -> String:
 			return "tank"
 		Kind.BOSS:
 			return "boss"
+		Kind.SNOWKING:
+			return "snowking"
 		Kind.MINI_BOSS:
 			return "miniboss"
 		Kind.FLYER:
@@ -690,8 +778,12 @@ func _build_boss_ring(s: float, col: Color) -> void:
 func _build_boss_marker(s: float, col: Color, text: String) -> void:
 	_marker_root = Node3D.new()
 	_marker_root.name = "BossMarker"
-	# 悬在血条上方（血条高度见 _build_bar 的 1.05*s + 0.25）
-	_marker_base_y = 1.05 * s + 0.25 + 0.60
+	# 悬在血条上方：血条高度可能是 1.05*s+0.25，也可能按 _body_h 抬高（精灵 / 3D 造型），
+	# 所以直接读 _bar_root 的实际高度，别让首领标记压到血条上。
+	var bar_y := 1.05 * s + 0.25
+	if _bar_root != null and is_instance_valid(_bar_root):
+		bar_y = _bar_root.position.y
+	_marker_base_y = bar_y + 0.60
 	_marker_root.position.y = _marker_base_y
 	add_child(_marker_root)
 
@@ -1428,11 +1520,17 @@ func _update_tint() -> void:
 		_mat.emission = _tint_base
 		_mat.emission_energy_multiplier = 0.12
 		if _enraged:
-			# 狂暴：底色压向暗红并常亮，一眼看出大首领进入了第二阶段
 			var base_col: Color = _tint_base
-			_mat.albedo_color = base_col.lerp(Color(1.0, 0.18, 0.22), 0.55)
-			_mat.emission = Color(1.0, 0.25, 0.30)
-			_mat.emission_energy_multiplier = 0.95
+			if kind == Kind.SNOWKING:
+				# 雪人王「暴雪」：不是狂暴冲锋，而是雪体冻成更深的冰蓝，一眼看出进入第二阶段
+				_mat.albedo_color = base_col.lerp(Color(0.55, 0.85, 1.0), 0.60)
+				_mat.emission = Color(0.42, 0.80, 1.0)
+				_mat.emission_energy_multiplier = 1.0
+			else:
+				# 狂暴：底色压向暗红并常亮，一眼看出大首领进入了第二阶段
+				_mat.albedo_color = base_col.lerp(Color(1.0, 0.18, 0.22), 0.55)
+				_mat.emission = Color(1.0, 0.25, 0.30)
+				_mat.emission_energy_multiplier = 0.95
 		if cloak:
 			_apply_cloak_visual()
 
@@ -1479,7 +1577,7 @@ func _die() -> void:
 	if _marker_root != null:
 		_marker_root.visible = false
 	Sound.play("death")
-	if kind == Kind.BOSS or kind == Kind.MINI_BOSS:
+	if is_boss():
 		# 首领倒下：更大的爆闪 + 冲击环，给足击杀反馈
 		Fx.flash(get_parent(), global_position, Color(1.0, 0.45, 0.55), 1.4, 0.45)
 		Fx.ring(get_parent(), global_position, Color(1.0, 0.45, 0.55), 2.4, 0.7)

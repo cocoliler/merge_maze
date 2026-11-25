@@ -5,6 +5,82 @@
 
 ---
 
+## 2026-11-25 新首领「雪人王」：霜渊第 10 波压轴，往炮塔丢雪球压攻速
+
+**需求**：给霜渊做一只专属压轴首领。它不砸塔、不脉冲熄火，而是**朝炮塔丢雪球**，
+被砸中的塔攻速下降一段时间（塔不会被摧毁）。是否启用由地图字段控制，没配置的图继续用通用「大首领」。
+**追加需求**：雪人王要改成真 3D 模型，并且造型要改造，不能和原画太像。
+
+**改动**
+
+- `scripts/SnowkingModel.gd`（新增）：雪人王的**程序化 3D 造型**，敌人与图鉴共用。
+  三层压扁雪球（头球单独抬高一截）+ 冰晶腰带 + 发光冰蓝眼与斜眉 + 短粗胡萝卜鼻 +
+  五棱冰晶王冠 + 横躺的六棱冰甲肩片 + 胸口双锥冰核 + 三道背部冰刺 +
+  不对称树枝手（右手托着一颗蓄力雪球）。
+  和原画的差异就是「改造」本身：原画是光膀子三球雪人，这里加了王冠 / 冰甲 / 冰核 / 背刺 / 装备感。
+  雪体压到 `(0.85, 0.90, 1.0)`，不是纯白 —— 霜渊的雪地本来就接近纯白。
+- `textures/enemy_snowking.png`：原画保留在工程里只作设计参考，**游戏内不再使用**
+  （处理脚本 `tools/gen_snowking_sprite.py`、原图 `tools/art/snowking_src.png` 照旧保留）。
+- `data/EnemyData.gd`：`Kind.SNOWKING`「雪人王」，1700 血 / 0.95 速 / 240 金 / 体型 2.90 / 护甲 0.15；
+  新增 `SNOWBALL_*` 常量组（间隔 6s、射程 8.5、减速 35%、持续 5s、半血后间隔 ×0.6、飞行速度 9、抛物线高度 1.3、召唤 2 只霜崽）。
+- `scripts/Enemy.gd`：`Kind` 枚举补 `SNOWKING`；`is_boss()` 把它算作首领；
+  `_tick_boss_skill()` 走雪球分支（`_first_skill_delay()` / `snowball_interval()`）；
+  `_throw_snowball()` 挑**射程内等级最高**的塔（同级取最近），射程内没塔就只抬手、1 秒后重试，不浪费 6 秒冷却；
+  半血「暴雪」缩短雪球间隔并召唤 2 只霜崽；外观走 `_build_snowking_body()`（SnowkingModel，真 3D），
+  血条按实测 `_body_h` 抬高、冰蓝光环 + 「BOSS」标记；半血染色改成冰蓝（不是大首领那种狂暴红）。
+- `scripts/Snowball.gd`（新增）：抛物线飞行（水平 lerp + sin 拱），命中调 `tower.chill()`；
+  目标塔在飞行途中被卖掉只放雪雾不结算；`GameState.running` 为 false 时停在空中（暂停 / 波间不砸塔）。
+- `scripts/Tower.gd`：新增 `atk_slow` / `_atk_slow_timer`；`shot_interval()` 把 `(1 - atk_slow)` 乘在面板攻速上
+  （不改 `fire_rate`，debuff 到点自动恢复，也不污染升级 / 变异数值）；`chill()` 取更强 + 刷新时间、不叠乘；
+  脚下冰蓝提示圈、首次命中飘字、浮窗与面板显示「被雪球砸中 / 当前实际攻速（原 X）」。
+- `scripts/Waves.gd`：`big_boss_kind(opts)` 读 `opts["big_boss"]`（默认 `Enemy.Kind.BOSS`），
+  第 10 波与无尽每 10 波用它替换压轴首领；`boss_name()` 跟着变，预告按钮能显示「雪人王」。
+- `scripts/Main.gd`：`_wave_opts()` 按地图 `snowking` 字段写入 `opts["big_boss"] = Enemy.Kind.SNOWKING`。
+- `scripts/MapDefs.gd`：字段说明补 `snowking`，霜渊图开启。
+- `scripts/TextureLib.gd`：`enemy_snowking` 从 billboard 原画精灵白名单移除（只剩霜崽）。
+- `scripts/GameUI.gd`：图鉴加雪人王（`_codex_suffix` 返回 "snowking"）；
+  没有 GLB 时**直接构建同一套 3D 造型**预览，而不是贴一张立绘。
+
+**验证**（`--headless` 扫描 + 导入，另跑临时脚本查波次 / 数据 / 模型）
+
+- 工程扫描与 `--import` 无 SCRIPT ERROR / Parse Error。
+- `SnowkingModel.build(2.9)`：29 个 MeshInstance3D，实测高 4.05（`ModelLib.height_of`）、
+  包围盒宽 4.27（含张开的手臂），`meta("body_mat")` 能取到主雪体材质（染色用）。
+- 实机：临时场景把 `MapDefs.pending_id` 设为 "frost" 加载主场景，`debug_spawn_at(SNOWKING, ...)`
+  刷出 1 只并把相机拉近截图 —— 模型站在雪径上约 2 格高，血条在头顶上方、`BOSS` 标记在血条上方，没有重叠；
+  正面 / 背面都能看到王冠、肩甲、腰带、背刺与托着的雪球。
+- `Waves.plan(10, {"big_boss": SNOWKING})` 末尾是 `[TANK, TANK, MINI_BOSS, SNOWKING]`，`has_snowking = true`；
+  `boss_name(10, {})` = 「大首领」，带 opts = 「雪人王」—— 默认图不受影响。
+- `Enemy.DATA[SNOWKING]` 取到 hp 1700 / snowball true。
+
+**踩的坑**
+
+- `EnemyData.Kind` 和 `Enemy.Kind` 是**两份独立枚举**，只加一份会报
+  `Cannot find member "SNOWKING" in base "Enemy.Kind"`（EnemyData 是数据表的 key，Enemy 是运行时类型）。
+  两份顺序必须完全一致。
+- 首领用 billboard 立绘会穿帮：本作是能绕视角的 3D 场景，方片一转就露馅，所以雪人王必须真 3D；
+  立绘方案只留给霜崽这种小杂兵。
+- 程序化模型最容易犯的错是**五官被球面吞掉**：第一版眼睛中心放在 z=0.18s、头球半径 0.22s，
+  整颗眼球埋进雪里，渲染出来就是「没有眼睛」。眼睛 / 嘴 / 冰核的 z 必须顶到该高度球面**外面**
+  （头半径 0.25s → 眼睛中心 0.235s），必要时宁可让眼球一半露在球外。
+- 肩甲不能做成「立着的高锥」：从正面会把中球两侧包住，看起来像两只蓝爪子捂脸；
+  改成**横躺的薄圆盘**扣在肩头（`rotation.z ≈ ±1.0`、高度 0.075s）才像护肩。
+- 雪体不要纯白：霜渊地面本身就是纯白，纯白雪人只剩一团过曝白斑；压到 `(0.85, 0.90, 1.0)` 才有体积感。
+- 验证造型要看**真实玩家相机**：正交/平视近景看不出俯视时王冠会不会被头球挡住，
+  临时场景里把 `cam_height` 调到 16 截一张，才看出王冠要加宽加高、背刺要斜向后上方。
+- 首领模型比程序化方块高（雪人王 4.05 vs 大首领 3.34），`_build_bar()` 用 `_body_h` 抬高血条后，
+  仍按 `1.05*s+0.25` 算位置的 `_build_boss_marker()` 会被血条压住 —— 标记高度改成读 `_bar_root.position.y + 0.60`。
+- `_body_h` 必须用 `ModelLib.height_of()` 实测：雪球是用 `SphereMesh.height` 压扁的椭球，
+  不是半径 ×2，手写常数会让血条和雪球出手点都偏。
+- 新精灵光有 png 不够：`TextureLib` 里有一份 billboard 原画槽位白名单，不加进去 `_build_sprite_body()` 直接返回 false，
+  会静默回退成方块（雪人王改 3D 后这条只对霜崽有效）。
+- `for t in get_tree().get_nodes_in_group("towers")` 拿到的 `t` 是 Variant，
+  `var d := t.global_position.distance_to(...)` 会触发 `Cannot infer the type of "d"` —— 显式写 `var d: float = ...`。
+- `godot --headless -s script.gd` 跑独立脚本时**不会加载 autoload**，碰到 `Sound` 就报 `Identifier not found: Sound`，
+  所以这类验证脚本只用 `Waves` / `EnemyData` / `TextureLib` 这些纯静态类，别实例化 `Enemy`。
+
+---
+
 ## 2026-11-25 新怪「霜崽」+ 雪地图的布防台改成白雪台
 
 **需求**：给了一张冰晶小怪的原画，要它当一只小杂兵；**冰面被凿开以后它也能从水下走**；

@@ -37,6 +37,7 @@ const SLOTS := [
 	"enemy_grunt", "enemy_runner", "enemy_tank", "enemy_boss",
 	"enemy_flyer", "enemy_shield",
 	# 霜崽：原画精灵（billboard 方片，带透明通道），见 Enemy._build_sprite_body()
+	# 雪人王不走贴图：它是程序化 3D 造型（scripts/SnowkingModel.gd）
 	"enemy_frostling",
 ]
 

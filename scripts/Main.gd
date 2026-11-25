@@ -855,6 +855,9 @@ func _wave_opts() -> Dictionary:
 		opts["frostling"] = true
 	if bool(md.get("frostweaver", false)):
 		opts["frostweaver"] = true
+	# 本图的压轴首领：霜渊是雪人王（丢雪球压塔攻速），没配置就还是通用大首领
+	if bool(md.get("snowking", false)):
+		opts["big_boss"] = Enemy.Kind.SNOWKING
 	return opts
 
 

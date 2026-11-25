@@ -957,7 +957,7 @@ func _build_codex() -> void:
 		Enemy.Kind.GRUNT, Enemy.Kind.RUNNER, Enemy.Kind.TANK,
 		Enemy.Kind.SHIELD, Enemy.Kind.HEALER, Enemy.Kind.SPLITTER, Enemy.Kind.CLOAK,
 		Enemy.Kind.FROSTLING, Enemy.Kind.ICEBREAKER, Enemy.Kind.FROSTWEAVER,
-		Enemy.Kind.MINI_BOSS, Enemy.Kind.BOSS,
+		Enemy.Kind.MINI_BOSS, Enemy.Kind.SNOWKING, Enemy.Kind.BOSS,
 	]
 	_codex_viewports.clear()
 	for k in kinds:
@@ -968,6 +968,9 @@ func _build_codex() -> void:
 ## 没有对应 GLB 时：有原画精灵（enemy_<后缀>.png）就显示精灵，否则回退成色块。
 func _codex_preview(k: int, d: Dictionary) -> Control:
 	var model := ModelLib.instance_path("res://models/enemies/enemy_%s.glb" % _codex_suffix(k))
+	# 雪人王没有 GLB：图鉴里直接用场上的程序化 3D 造型，而不是贴一张立绘
+	if model == null and k == Enemy.Kind.SNOWKING:
+		model = SnowkingModel.build(1.0)
 	if model == null:
 		var tex := TextureLib.get_texture("enemy_%s" % _codex_suffix(k))
 		if tex != null:
@@ -1067,6 +1070,8 @@ func _codex_suffix(k: int) -> String:
 			return "frostweaver"
 		Enemy.Kind.FROSTLING:
 			return "frostling"
+		Enemy.Kind.SNOWKING:
+			return "snowking"
 		_:
 			return "grunt"
 
@@ -1546,7 +1551,11 @@ func _refresh_wave_button() -> void:
 		return
 
 	var next := GameState.wave + 1
-	var boss := Waves.boss_name(next)
+	# 首领名要跟着地图走（霜渊第 10 波是雪人王，不是通用大首领）
+	var wave_opts := {}
+	if main != null:
+		wave_opts = main._wave_opts()
+	var boss := Waves.boss_name(next, wave_opts)
 	var full := _preview(next)
 	btn_wave.tooltip_text = "下一波：" + full
 	if boss != "":

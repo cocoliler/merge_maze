@@ -57,10 +57,15 @@ static func is_mini_boss_wave(wave: int) -> bool:
 	return wave > 0 and wave % 5 == 0 and not is_big_boss_wave(wave)
 
 
+## 本图的压轴首领：默认「大首领」，地图可以在 opts 里换成自己的（例如霜渊的雪人王）
+static func big_boss_kind(opts: Dictionary = {}) -> int:
+	return int(opts.get("big_boss", Enemy.Kind.BOSS))
+
+
 ## 下一波的首领名字；没有首领返回空串。给「开始第 N 波」按钮做战前预告用。
-static func boss_name(wave: int) -> String:
+static func boss_name(wave: int, opts: Dictionary = {}) -> String:
 	if is_big_boss_wave(wave):
-		return str(Enemy.DATA[Enemy.Kind.BOSS]["name"])
+		return str(Enemy.DATA[big_boss_kind(opts)]["name"])
 	if is_mini_boss_wave(wave):
 		return str(Enemy.DATA[Enemy.Kind.MINI_BOSS]["name"])
 	return ""
@@ -74,12 +79,15 @@ static func boss_name(wave: int) -> String:
 ##                 比碎冰者更少：每波最多 3 只，第 4 波起出现。
 ##   "frostling"   本图有霜崽（冰原小怪）→ 混入小杂兵，每波最多 8 只，第 2 波起出现。
 ##                 它**自己砸不开冰面**，要等碎冰者把湖凿开以后才走水下段。
+##   "big_boss"    第 10 波（以及无尽每 10 波）的压轴首领换成谁，默认 Enemy.Kind.BOSS。
+##                 霜渊用 Enemy.Kind.SNOWKING（雪人王：丢雪球压塔攻速）。
 static func plan(wave: int, opts: Dictionary = {}) -> Array:
 	var list: Array = []
 	var n := wave
 	var icebreak := bool(opts.get("icebreaker", false))
 	var weaver := bool(opts.get("frostweaver", false))
 	var frostling := bool(opts.get("frostling", false))
+	var boss_kind := big_boss_kind(opts)
 
 	for i in range(6 + n * 2):
 		list.append(Enemy.Kind.GRUNT)
@@ -116,11 +124,12 @@ static func plan(wave: int, opts: Dictionary = {}) -> Array:
 	list.shuffle()
 
 	if is_big_boss_wave(n):
-		# 最后一波（以及无尽模式每 10 波）：重甲开路 + 1 个小首领护卫 + 压轴大首领
+		# 最后一波（以及无尽模式每 10 波）：重甲开路 + 1 个小首领护卫 + 压轴首领
+		# 压轴首领按地图换（霜渊是雪人王），没配置就是原来的大首领
 		for i in range(clampi(n - 3, 2, 8)):
 			list.append(Enemy.Kind.TANK)
 		list.append(Enemy.Kind.MINI_BOSS)
-		list.append(Enemy.Kind.BOSS)
+		list.append(boss_kind)
 	elif is_mini_boss_wave(n):
 		# 每 5 波：重甲开路 + 小首领
 		for i in range(clampi(n - 3, 2, 8)):

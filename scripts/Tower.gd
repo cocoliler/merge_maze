@@ -96,6 +96,11 @@ var crit_bonus: float = 0.0   # 变异带来的塔级暴击加成（叠加在全
 ## 被大首领「压制脉冲」命中的剩余时间：压制期间冷却照常走完，但不开火（塔不会被摧毁）
 var suppress_timer: float = 0.0
 
+## 被雪人王的「雪球」砸中：攻速下降的比例（0 = 正常）与剩余时间。
+## 和 suppress 的区别：压制是「完全不开火」，雪球只是「开火变慢」—— 塔照常输出，只是变钝。
+var atk_slow: float = 0.0
+var _atk_slow_timer: float = 0.0
+
 var cooldown: float = 0.0
 var muzzle_y: float = 1.5
 var _recoil: float = 0.0
@@ -112,6 +117,7 @@ var _aim_timer: float = 0.0
 var _ring: MeshInstance3D        # 射程圈：半透明圆盘
 var _ring_edge: MeshInstance3D   # 射程圈：描边圆环（让边界一眼可见）
 var _suppress_ring: MeshInstance3D # 压制提示圈：被首领脉冲熄火时脚下亮紫圈
+var _snow_ring: MeshInstance3D    # 雪球提示圈：被雪人王砸中、攻速下降时脚下亮冰蓝圈
 var _pip_root: Node3D
 var _selected: bool = false
 var _hovered: bool = false
@@ -159,6 +165,14 @@ func _process(delta: float) -> void:
 		suppress_timer -= delta
 		if suppress_timer <= 0.0 and _suppress_ring != null and is_instance_valid(_suppress_ring):
 			_suppress_ring.visible = false
+
+	# 雪球减速：到点自动恢复，不需要任何「解除」入口
+	if _atk_slow_timer > 0.0:
+		_atk_slow_timer -= delta
+		if _atk_slow_timer <= 0.0:
+			atk_slow = 0.0
+			if _snow_ring != null and is_instance_valid(_snow_ring):
+				_snow_ring.visible = false
 
 	if _recoil > 0.0:
 		_recoil = maxf(_recoil - delta * 4.0, 0.0)
@@ -429,8 +443,10 @@ func _update_aura(delta: float) -> void:
 
 
 ## 两发之间的间隔（秒）：直接用原来的攻速（1/攻速），改造前是多少现在就还是多少。
+## 被雪人王的雪球砸中时攻速按 (1 - atk_slow) 打折 —— 乘在「面板攻速」上而不是改 fire_rate，
+## 这样 debuff 结束时自动恢复，也不会污染升级 / 变异算出来的数值。
 func shot_interval() -> float:
-	return 1.0 / maxf(fire_rate, 0.05)
+	return 1.0 / maxf(fire_rate * (1.0 - atk_slow), 0.05)
 
 
 ## 持续射线的每帧更新：挑目标 → 画射线 → 到点就打出一发（伤害本身不走「每秒摊平」）。
@@ -629,6 +645,29 @@ func _build_base() -> void:
 	_suppress_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_suppress_ring.visible = false
 	add_child(_suppress_ring)
+
+	# 雪球提示圈：比压制圈小一号、抬得更高，两种 debuff 同时在场时不会叠成一圈
+	_snow_ring = MeshInstance3D.new()
+	_snow_ring.name = "SnowRing"
+	var nm := TorusMesh.new()
+	nm.inner_radius = 0.70
+	nm.outer_radius = 0.84
+	nm.rings = 32
+	nm.ring_segments = 6
+	_snow_ring.mesh = nm
+	var nmat := StandardMaterial3D.new()
+	nmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	nmat.albedo_color = Color(0.72, 0.94, 1.0, 0.95)
+	nmat.emission_enabled = true
+	nmat.emission = Color(0.55, 0.85, 1.0)
+	nmat.emission_energy_multiplier = 1.3
+	nmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	nmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_snow_ring.material_override = nmat
+	_snow_ring.position.y = 0.22
+	_snow_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_snow_ring.visible = false
+	add_child(_snow_ring)
 
 	_pip_root = Node3D.new()
 	_pip_root.name = "Pips"
@@ -891,6 +930,23 @@ func suppress(time: float) -> void:
 		_suppress_ring.visible = true
 
 
+## 被雪人王的「雪球」砸中：攻速下降 factor、持续 time 秒（塔不会被摧毁，也不会停火）。
+## 取更强 + 刷新时间：连着被砸不会叠乘成「整座塔废掉」，但会一直被压在更低的攻速上。
+func chill(factor: float, time: float) -> void:
+	factor = clampf(factor, 0.0, 0.7)
+	if _atk_slow_timer <= 0.0:
+		# 第一次命中才飘字：连续被砸时不刷屏，只靠脚下的冰蓝圈提示
+		Fx.flash(get_parent(), global_position + Vector3(0.0, muzzle_y * 0.5, 0.0),
+			Color(0.80, 0.94, 1.0), 0.9, 0.28)
+		Fx.damage_number(get_parent(), global_position + Vector3(0.0, muzzle_y * 1.15, 0.0),
+			"攻速 -%d%%" % int(round(factor * 100.0)), Color(0.70, 0.92, 1.0), false)
+		Sound.play("hit", -12.0)
+	atk_slow = maxf(atk_slow, factor)
+	_atk_slow_timer = maxf(_atk_slow_timer, time)
+	if _snow_ring != null and is_instance_valid(_snow_ring):
+		_snow_ring.visible = true
+
+
 func set_selected(v: bool) -> void:
 	_selected = v
 	_update_ring_visibility()
@@ -948,9 +1004,15 @@ func info_text() -> String:
 		tip = "升级到 Lv.%d：%d 金（浮窗「升级」按钮）\n满级 Lv.%d 后可变异，决定这座塔的最终形态" % [level + 1, upgrade_cost(), MAX_LEVEL]
 	if suppress_timer > 0.0:
 		tip = "⚠ 正被首领脉冲压制：%.1fs 内无法开火\n%s" % [suppress_timer, tip]
+	if _atk_slow_timer > 0.0:
+		tip = "❄ 正被雪球砸中：攻速 -%d%%，剩 %.1fs\n%s" % [int(round(atk_slow * 100.0)), _atk_slow_timer, tip]
 
 	# 光环塔没有伤害和攻速，面板换成「范围减速」的说法，免得玩家以为它坏了
-	var line := "伤害 %.0f%s · 射程 %.1f · 攻速 %.2f/s" % [damage, extra, range_v, fire_rate]
+	# 被雪球砸中时面板显示「当前实际攻速」，玩家能直接看到这一下掉了多少
+	var rate_now := fire_rate * (1.0 - atk_slow)
+	var line := "伤害 %.0f%s · 射程 %.1f · 攻速 %.2f/s" % [damage, extra, range_v, rate_now]
+	if atk_slow > 0.0:
+		line += "（原 %.2f）" % fire_rate
 	if is_aura():
 		line = "冰雾光环：射程 %.1f 内减速 %.0f%% · 不造成伤害" % [range_v, slow * 100.0]
 	return "[%s Lv.%d]\n%s\n%s\n目标优先级：%s（Q 切换）\n%s%s" % [
