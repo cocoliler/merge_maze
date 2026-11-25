@@ -9,6 +9,13 @@ export_presets.cfg
 *.translation
 *.tmp
 
+# Python 脚本缓存
+__pycache__/
+*.pyc
+
+# 开发期临时脚本 / 截图 / 日志（_tmp_ 前缀都是排查问题时现写的，不进库）
+_tmp_*
+
 # 系统 / 编辑器杂物
 .DS_Store
 Thumbs.db

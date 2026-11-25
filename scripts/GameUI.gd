@@ -45,6 +45,27 @@ var btn_debug: Button
 var debug_root: Panel
 var debug_spin: SpinBox
 
+# 测试工具：上帝模式（F2）—— 左键点地图任意格直接刷怪
+## 面板开着的时候左键就是「出怪」，这样不需要额外的「已启用」状态，
+## 面板本身就是提示：看得见它，就知道左键在放怪。
+var btn_god: Button
+var god_root: Panel
+var god_kinds: Array = []              # Enemy.DATA 的键，顺序 = Kind 枚举顺序
+var god_idx: int = 0                   # 当前选中的敌人类型（god_kinds 的下标）
+var god_count: int = 1                 # 一次放几只
+var god_hp: float = 1.0                # 血量倍率（叠在波次成长上）
+var god_type_btn: Button
+var god_count_btn: Button
+var god_hp_btn: Button
+var _god_count_idx: int = 0
+var _god_hp_idx: int = 0
+
+# 开发用地图切换器（右上角按钮 / F1）
+var btn_map: Button
+var map_root: Control
+var map_list: VBoxContainer
+var _was_paused_before_map: bool = false
+
 var lbl_best: Label
 
 var wave_result_root: Control
@@ -52,6 +73,8 @@ var wave_result_stats: Label
 var _pending_cards: Array = []
 
 var end_btn2: Button
+var end_btn_next: Button             # 「前往下一张地图」（只有存在下一张图时才显示）
+var _end_next_id: String = ""
 
 var _preview_cache: Dictionary = {}   # 波次 -> 预告文本（避免每次刷新都重新洗牌）
 
@@ -98,7 +121,7 @@ const CODEX_PREVIEW_HEIGHT := 1.7     # 预览里模型归一化后的世界高�
 # 这样 10 条 + 标题刚好放进 HINT_MAX_HEIGHT，不会自动换行把文字顶到面板外面。
 # 想加内容就加一条，同时确认总行数仍能装下（或调大 HINT_MAX_HEIGHT）。
 const HINT_LINES := [
-	"左键点蓝色布防台建塔，可连续放置",
+	"左键点发光的布防台建塔，可连续放置",
 	"左键点塔：升级 / 出售 · 悬停看射程",
 	"出售走塔浮窗按钮，返还 50% 投入",
 	"拖动空白处平移视角 · 滚轮缩放",
@@ -107,7 +130,7 @@ const HINT_LINES := [
 	"ESC：取消建造 / 关闭当前面板",
 	"塔随波次解锁，商店标注解锁波次",
 	"蓝光地砖可建塔 · 棕色土路是敌线",
-	"目标：守住左侧水晶，别让敌人冲线",
+	"目标：守住水晶，别让敌人冲到跟前",
 ]
 
 
@@ -141,12 +164,14 @@ func _build() -> void:
 	_build_speed_pause_btns()
 	_build_hint()
 	_build_debug()
+	_build_god()
 	_build_codex()
 	_build_cards()
 	_build_mutations()
 	_build_wave_result()
 	_build_end()
 	_build_pause()
+	_build_map_switch()      # 放最后：切换器面板要盖在其他面板之上
 
 
 func _style_panel(p: Panel) -> void:
@@ -310,9 +335,10 @@ func _build_shop() -> void:
 	p.anchor_right = 0.5
 	p.anchor_top = 1.0
 	p.anchor_bottom = 1.0
-	p.offset_left = -520
+	# 8 种塔 + 波次按钮：面板要比 7 种塔时再宽一点，否则最后两个按钮会被挤出屏幕
+	p.offset_left = -588
 	p.offset_top = -104
-	p.offset_right = 520
+	p.offset_right = 588
 	p.offset_bottom = -16
 	_style_panel(p)
 	ui_root.add_child(p)
@@ -322,9 +348,9 @@ func _build_shop() -> void:
 	hb.add_theme_constant_override("separation", 10)
 	p.add_child(hb)
 
-	for k in [Tower.Kind.ARROW, Tower.Kind.CANNON, Tower.Kind.FROST, Tower.Kind.SNIPER, Tower.Kind.TESLA, Tower.Kind.FLAME, Tower.Kind.BOUNCE]:
+	for k in [Tower.Kind.ARROW, Tower.Kind.CANNON, Tower.Kind.FROST, Tower.Kind.SNIPER, Tower.Kind.TESLA, Tower.Kind.FLAME, Tower.Kind.BOUNCE, Tower.Kind.POISON]:
 		var b := Button.new()
-		b.custom_minimum_size = Vector2(104, 60)
+		b.custom_minimum_size = Vector2(96, 60)
 		b.pressed.connect(_on_shop_pressed.bind(k))
 		hb.add_child(b)
 		shop_btns.append(b)
@@ -536,10 +562,12 @@ func _build_debug() -> void:
 	debug_root.anchor_right = 1.0
 	debug_root.anchor_top = 0.0
 	debug_root.anchor_bottom = 0.0
+	# 下方还给「地图切换」按钮（slot 5）留一行，面板整体再往下挪一格
+	var panel_top := dbg_bottom + RIGHT_BTN_GAP + RIGHT_BTN_HEIGHT + RIGHT_BTN_GAP
 	debug_root.offset_left = -320
-	debug_root.offset_top = dbg_bottom + RIGHT_BTN_GAP
+	debug_root.offset_top = panel_top
 	debug_root.offset_right = -SCREEN_MARGIN
-	debug_root.offset_bottom = dbg_bottom + RIGHT_BTN_GAP + 304
+	debug_root.offset_bottom = panel_top + 304
 	debug_root.visible = false
 	_style_panel(debug_root)
 	ui_root.add_child(debug_root)
@@ -601,6 +629,263 @@ func _build_debug() -> void:
 	close.custom_minimum_size = Vector2(0, 28)
 	close.pressed.connect(func(): debug_root.visible = false)
 	vb.add_child(close)
+
+
+## 测试工具：上帝模式（右上角按钮 / F2）。
+## 面板挂在**顶部正中**而不是右上角按钮列下方 —— 按钮列到「地图切换」已经顶到 618，
+## 下面放不下一块面板了；中间顶部这块一直空着，也正好不挡左右两侧的信息栏。
+func _build_god() -> void:
+	btn_god = Button.new()
+	btn_god.text = "上帝模式 F2"
+	_place_right_col(btn_god, 6)
+	btn_god.pressed.connect(_on_god_pressed)
+	ui_root.add_child(btn_god)
+
+	god_root = Panel.new()
+	god_root.anchor_left = 0.5
+	god_root.anchor_right = 0.5
+	god_root.anchor_top = 0.0
+	god_root.anchor_bottom = 0.0
+	god_root.offset_left = -232
+	god_root.offset_right = 232
+	god_root.offset_top = 12
+	god_root.offset_bottom = 118
+	god_root.visible = false
+	_style_panel(god_root)
+	ui_root.add_child(god_root)
+
+	var vb := VBoxContainer.new()
+	_fill(vb, 12, 8, -12, -8)
+	vb.add_theme_constant_override("separation", 6)
+	god_root.add_child(vb)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	vb.add_child(row)
+
+	var title := Label.new()
+	title.text = "上帝模式"
+	title.add_theme_color_override("font_color", Color(1.0, 0.86, 0.45))
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(title)
+
+	god_type_btn = Button.new()
+	god_type_btn.custom_minimum_size = Vector2(118, 30)
+	god_type_btn.tooltip_text = "点一下换一种怪"
+	god_type_btn.pressed.connect(_on_god_type)
+	row.add_child(god_type_btn)
+
+	god_count_btn = Button.new()
+	god_count_btn.custom_minimum_size = Vector2(58, 30)
+	god_count_btn.tooltip_text = "一次放几只"
+	god_count_btn.pressed.connect(_on_god_count)
+	row.add_child(god_count_btn)
+
+	god_hp_btn = Button.new()
+	god_hp_btn.custom_minimum_size = Vector2(70, 30)
+	god_hp_btn.tooltip_text = "血量倍率（叠在当前波次的成长之上）"
+	god_hp_btn.pressed.connect(_on_god_hp)
+	row.add_child(god_hp_btn)
+
+	var close := Button.new()
+	close.text = "关闭"
+	close.custom_minimum_size = Vector2(60, 30)
+	close.pressed.connect(_on_god_pressed)
+	row.add_child(close)
+
+	var tip := Label.new()
+	tip.text = "左键点地图任意位置放怪（水面 / 岩石 / 路线外都行）；波间休整时刷的怪要等开波才会走"
+	tip.add_theme_color_override("font_color", Color(0.72, 0.78, 0.90))
+	# 面板宽度是固定像素，不换行的话这行字会直接溢出到地图上
+	tip.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	tip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vb.add_child(tip)
+
+	# 类型列表直接取 Enemy.DATA 的键：以后加新怪不用回来改这里
+	for k in Enemy.DATA.keys():
+		god_kinds.append(int(k))
+	_refresh_god_ui()
+
+
+func _on_god_pressed() -> void:
+	toggle_god()
+
+
+func toggle_god() -> void:
+	if god_root == null:
+		return
+	god_root.visible = not god_root.visible
+	Sound.play("click")
+	if god_root.visible and main != null:
+		# 进上帝模式先把建造模式退掉：否则一次左键既要放怪又要建塔
+		main.call("set_build_kind", -1)
+
+
+func god_visible() -> bool:
+	return god_root != null and god_root.visible
+
+
+## 当前面板选中的敌人类型（Enemy.Kind）
+func god_kind() -> int:
+	if god_kinds.is_empty():
+		return Enemy.Kind.GRUNT
+	return int(god_kinds[clampi(god_idx, 0, god_kinds.size() - 1)])
+
+
+func _on_god_type() -> void:
+	if god_kinds.is_empty():
+		return
+	god_idx = (god_idx + 1) % god_kinds.size()
+	_refresh_god_ui()
+
+
+func _on_god_count() -> void:
+	var opts := [1, 3, 5, 10]
+	_god_count_idx = (_god_count_idx + 1) % opts.size()
+	god_count = int(opts[_god_count_idx])
+	_refresh_god_ui()
+
+
+func _on_god_hp() -> void:
+	var opts := [1.0, 3.0, 10.0]
+	_god_hp_idx = (_god_hp_idx + 1) % opts.size()
+	god_hp = float(opts[_god_hp_idx])
+	_refresh_god_ui()
+
+
+func _refresh_god_ui() -> void:
+	if god_type_btn == null:
+		return
+	var k := god_kind()
+	var nm := str(Enemy.DATA[k].get("name", "?"))
+	god_type_btn.text = "怪：%s" % nm
+	god_count_btn.text = "×%d" % god_count
+	god_hp_btn.text = "血 ×%d" % int(god_hp)
+
+
+## 开发用地图切换器（右上角按钮 / F1）：列出 MapDefs 里的所有地图，点一下重载场景过去。
+## 纯开发工具，不做解锁限制 —— 任何一张图随时能进。
+func _build_map_switch() -> void:
+	btn_map = Button.new()
+	btn_map.text = "地图切换 F1"
+	_place_right_col(btn_map, 5)
+	btn_map.pressed.connect(_on_map_pressed)
+	ui_root.add_child(btn_map)
+
+	map_root = Control.new()
+	map_root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	map_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	map_root.visible = false
+	ui_root.add_child(map_root)
+
+	var dim := ColorRect.new()
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.color = Color(0.0, 0.0, 0.0, 0.55)
+	map_root.add_child(dim)
+
+	var wrap := Panel.new()
+	wrap.anchor_left = 0.5
+	wrap.anchor_right = 0.5
+	wrap.anchor_top = 0.5
+	wrap.anchor_bottom = 0.5
+	wrap.offset_left = -330
+	wrap.offset_right = 330
+	wrap.offset_top = -220
+	wrap.offset_bottom = 220
+	_style_panel(wrap)
+	map_root.add_child(wrap)
+
+	var vb := VBoxContainer.new()
+	_fill(vb, 22, 20, -22, -20)
+	vb.add_theme_constant_override("separation", 10)
+	wrap.add_child(vb)
+
+	var title := Label.new()
+	title.text = "地图切换 · 开发用"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 24)
+	title.add_theme_color_override("font_color", Color(0.55, 0.92, 1.0))
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vb.add_child(title)
+
+	var sub := Label.new()
+	sub.text = "点一下立即切换（重载场景）。金币 / 生命按新开一局算，不继承。"
+	sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.add_theme_color_override("font_color", Color(0.72, 0.80, 0.90))
+	sub.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vb.add_child(sub)
+
+	map_list = VBoxContainer.new()
+	map_list.add_theme_constant_override("separation", 8)
+	map_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vb.add_child(map_list)
+
+	var close := Button.new()
+	close.text = "关闭 (F1)"
+	close.custom_minimum_size = Vector2(0, 40)
+	close.pressed.connect(func(): map_root.visible = false)
+	vb.add_child(close)
+
+
+## 重建地图列表：当前地图标「当前」（仍然可点 = 重新载入），其余直接切过去
+func _refresh_map_list() -> void:
+	if map_list == null:
+		return
+	for c in map_list.get_children():
+		map_list.remove_child(c)
+		c.queue_free()
+	var cur := ""
+	if main != null:
+		cur = str(main.get("map_id"))
+	if cur == "":
+		cur = MapDefs.DEFAULT_ID
+	for id in MapDefs.ids():
+		var d: Dictionary = MapDefs.get_map(id)
+		var b := Button.new()
+		var tag: String = "（当前 · 点击重载）" if id == cur else ""
+		b.text = "%s%s\n%s" % [str(d.get("name", id)), tag, str(d.get("desc", ""))]
+		b.custom_minimum_size = Vector2(0, 62)
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.tooltip_text = "地图 id: %s" % id
+		b.pressed.connect(_on_map_pick.bind(id))
+		map_list.add_child(b)
+
+
+func toggle_map_switch() -> void:
+	if map_root == null:
+		return
+	if map_root.visible:
+		_close_map_switch()
+		return
+	_refresh_map_list()
+	map_root.visible = true
+	# 面板打开时暂停战场（和暂停 / 图鉴一致），免得在挑地图的时候家被拆了
+	_was_paused_before_map = get_tree().paused
+	get_tree().paused = true
+	Sound.play("click")
+
+
+func _close_map_switch() -> void:
+	if map_root == null or not map_root.visible:
+		return
+	map_root.visible = false
+	get_tree().paused = _was_paused_before_map
+
+
+func map_switch_visible() -> bool:
+	return map_root != null and map_root.visible
+
+
+func _on_map_pressed() -> void:
+	toggle_map_switch()
+
+
+func _on_map_pick(id: String) -> void:
+	Sound.play("click")
+	_close_map_switch()
+	if main != null:
+		main.call("go_to_map", id)
 
 
 func _build_codex() -> void:
@@ -671,6 +956,7 @@ func _build_codex() -> void:
 	var kinds := [
 		Enemy.Kind.GRUNT, Enemy.Kind.RUNNER, Enemy.Kind.TANK,
 		Enemy.Kind.SHIELD, Enemy.Kind.HEALER, Enemy.Kind.SPLITTER, Enemy.Kind.CLOAK,
+		Enemy.Kind.FROSTLING, Enemy.Kind.ICEBREAKER, Enemy.Kind.FROSTWEAVER,
 		Enemy.Kind.MINI_BOSS, Enemy.Kind.BOSS,
 	]
 	_codex_viewports.clear()
@@ -679,10 +965,20 @@ func _build_codex() -> void:
 
 
 ## 图鉴里的小 3D 预览：一个独立 SubViewport 里放归一化后的敌方模型。
-## 没有对应 GLB 时回退成原来的色块，保证图鉴永远能显示。
+## 没有对应 GLB 时：有原画精灵（enemy_<后缀>.png）就显示精灵，否则回退成色块。
 func _codex_preview(k: int, d: Dictionary) -> Control:
 	var model := ModelLib.instance_path("res://models/enemies/enemy_%s.glb" % _codex_suffix(k))
 	if model == null:
+		var tex := TextureLib.get_texture("enemy_%s" % _codex_suffix(k))
+		if tex != null:
+			var pic := TextureRect.new()
+			pic.texture = tex
+			pic.custom_minimum_size = Vector2(CODEX_PREVIEW_SIZE, CODEX_PREVIEW_SIZE)
+			pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			pic.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			pic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			return pic
 		var swatch := ColorRect.new()
 		swatch.custom_minimum_size = Vector2(30, 30)
 		swatch.color = d["color"]
@@ -765,6 +1061,12 @@ func _codex_suffix(k: int) -> String:
 			return "healer"
 		Enemy.Kind.SPLITTER:
 			return "splitter"
+		Enemy.Kind.ICEBREAKER:
+			return "icebreaker"
+		Enemy.Kind.FROSTWEAVER:
+			return "frostweaver"
+		Enemy.Kind.FROSTLING:
+			return "frostling"
 		_:
 			return "grunt"
 
@@ -1004,10 +1306,10 @@ func _build_end() -> void:
 	wrap.anchor_right = 0.5
 	wrap.anchor_top = 0.5
 	wrap.anchor_bottom = 0.5
-	wrap.offset_left = -260
-	wrap.offset_right = 260
-	wrap.offset_top = -150
-	wrap.offset_bottom = 150
+	wrap.offset_left = -350
+	wrap.offset_right = 350
+	wrap.offset_top = -200
+	wrap.offset_bottom = 200
 	_style_panel(wrap)
 	end_root.add_child(wrap)
 
@@ -1028,15 +1330,29 @@ func _build_end() -> void:
 	end_sub.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vb.add_child(end_sub)
 
+	# 胜利后「前往下一张地图」和「重新开始」并排；失败时前者隐藏、后者铺满
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	vb.add_child(row)
+
+	end_btn_next = Button.new()
+	end_btn_next.text = "前往下一张地图"
+	end_btn_next.custom_minimum_size = Vector2(0, 52)
+	end_btn_next.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	end_btn_next.visible = false
+	end_btn_next.pressed.connect(_on_end_next)
+	row.add_child(end_btn_next)
+
 	var b := Button.new()
 	b.text = "重新开始"
-	b.custom_minimum_size = Vector2(0, 56)
+	b.custom_minimum_size = Vector2(0, 52)
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	b.pressed.connect(_on_restart)
-	vb.add_child(b)
+	row.add_child(b)
 
 	end_btn2 = Button.new()
 	end_btn2.text = "继续无尽模式"
-	end_btn2.custom_minimum_size = Vector2(0, 56)
+	end_btn2.custom_minimum_size = Vector2(0, 52)
 	end_btn2.visible = false
 	end_btn2.pressed.connect(_on_endless)
 	vb.add_child(end_btn2)
@@ -1145,10 +1461,16 @@ func _build_pause() -> void:
 # ---------------------------------------------------------------- 刷新
 
 func refresh() -> void:
+	# HUD 第一行带上当前地图短名，切图后一眼能看出在哪（"裂谷 · 波次 3 / 10"）
+	var map_short := ""
+	if main != null:
+		map_short = MapDefs.short_of(str(main.get("map_id")))
+	if map_short != "":
+		map_short += " · "
 	if main != null and bool(main.get("endless")):
-		lbl_wave.text = "无尽  波次 %d" % GameState.wave
+		lbl_wave.text = "%s无尽  波次 %d" % [map_short, GameState.wave]
 	else:
-		lbl_wave.text = "波次  %d / %d" % [GameState.wave, Waves.TOTAL]
+		lbl_wave.text = "%s波次  %d / %d" % [map_short, GameState.wave, Waves.TOTAL]
 	lbl_lives.text = "生命  %d" % GameState.lives
 	lbl_gold.text = "金币  %d" % GameState.gold
 	lbl_best.text = "最高  %d 波" % GameState.best_wave
@@ -1176,7 +1498,7 @@ func refresh() -> void:
 	if float(b.get("refund", 0.5)) > 0.501: parts.append("回收%d%%" % int(float(b["refund"]) * 100.0))
 	lbl_buff.text = " ".join(parts) if parts.size() > 0 else "暂无强化"
 
-	var kinds := [Tower.Kind.ARROW, Tower.Kind.CANNON, Tower.Kind.FROST, Tower.Kind.SNIPER, Tower.Kind.TESLA, Tower.Kind.FLAME, Tower.Kind.BOUNCE]
+	var kinds := [Tower.Kind.ARROW, Tower.Kind.CANNON, Tower.Kind.FROST, Tower.Kind.SNIPER, Tower.Kind.TESLA, Tower.Kind.FLAME, Tower.Kind.BOUNCE, Tower.Kind.POISON]
 	var picked: int = int(main.get("build_kind")) if main != null else -1
 	for i in range(shop_btns.size()):
 		var k: int = kinds[i]
@@ -1239,7 +1561,12 @@ func _refresh_wave_button() -> void:
 ## 波次预告缓存：refresh() 每次金币变化都会调用，不能每次都重建数组再洗牌
 func _preview(wave: int) -> String:
 	if not _preview_cache.has(wave):
-		_preview_cache[wave] = Waves.preview(wave)
+		# 地图专属怪（碎冰者 / 霜语者）的预告必须和实际出怪用同一套规则，
+		# 所以直接问 Main 要那份「本图开关」，不要在这里重算一遍。
+		var opts := {}
+		if main != null:
+			opts = main._wave_opts()
+		_preview_cache[wave] = Waves.preview(wave, opts)
 	return str(_preview_cache[wave])
 
 
@@ -1363,6 +1690,7 @@ func _popup_blocked() -> bool:
 		or (mutation_root != null and mutation_root.visible) \
 		or (end_root != null and end_root.visible) \
 		or (wave_result_root != null and wave_result_root.visible) \
+		or (map_root != null and map_root.visible) \
 		or (pause_root != null and pause_root.visible)
 
 
@@ -1504,18 +1832,27 @@ func _on_mutation_picked(id: String) -> void:
 		main.call("apply_mutation", id)
 
 
-func show_end(win: bool) -> void:
+## next_map_id 非空时，结算面板会多出「前往下一张地图」按钮（第十波守住后才有）。
+func show_end(win: bool, next_map_id: String = "") -> void:
 	close_mutation_panel()
+	_end_next_id = next_map_id
 	if win:
 		end_title.text = "黎明降临"
 		end_title.add_theme_color_override("font_color", Color(0.45, 1.0, 0.60))
-		end_sub.text = "终焉水晶仍在呼吸。\n你守住了全部 %d 波蚀潮，剩余焰心（生命）：%d\n可继续挑战「余潮」无尽模式！" % [Waves.TOTAL, GameState.lives]
+		var extra := ""
+		if next_map_id != "":
+			extra = "\n东侧的裂口后面是「%s」，潮水还没退干净。" % MapDefs.name_of(next_map_id)
+		end_sub.text = "终焉水晶仍在呼吸。\n你守住了全部 %d 波蚀潮，剩余焰心（生命）：%d%s\n可继续挑战「余潮」无尽模式！" % [Waves.TOTAL, GameState.lives, extra]
 		end_btn2.visible = true
+		end_btn_next.visible = next_map_id != ""
+		if next_map_id != "":
+			end_btn_next.text = "前往「%s」" % MapDefs.name_of(next_map_id)
 	else:
 		end_title.text = "水晶熄灭"
 		end_title.add_theme_color_override("font_color", Color(1.0, 0.45, 0.45))
-		end_sub.text = "在第 %d 波倒下 —— 永夜吞没了裂谷。\n再试一次吧。" % GameState.wave
+		end_sub.text = "在第 %d 波倒下 —— 永夜吞没了%s。\n再试一次吧。" % [GameState.wave, MapDefs.short_of(str(main.get("map_id")) if main != null else "")]
 		end_btn2.visible = false
+		end_btn_next.visible = false
 	end_root.visible = true
 
 
@@ -1596,6 +1933,10 @@ func _on_restart() -> void:
 	get_tree().paused = false
 	Engine.time_scale = 1.0
 	GameState.reset()
+	# 重开当前地图：场景文件里不存地图 id，必须把当前图写回 pending_id，
+	# 否则 reload 后会掉回默认地图（第二张图重开会莫名其妙回到裂谷）
+	if main != null:
+		MapDefs.pending_id = str(main.get("map_id"))
 	get_tree().reload_current_scene()
 
 
@@ -1623,6 +1964,16 @@ func _on_endless() -> void:
 		main.call("continue_endless")
 
 
+## 结算面板「前往下一张地图」：金币 / 生命继承，塔和卡牌不继承
+func _on_end_next() -> void:
+	Sound.play("click")
+	if main == null or _end_next_id == "":
+		return
+	get_tree().paused = false
+	Engine.time_scale = 1.0
+	main.call("go_to_next_map")
+
+
 func show_pause(p: bool) -> void:
 	if pause_root != null:
 		pause_root.visible = p
@@ -1634,7 +1985,7 @@ func update_speed(s: float) -> void:
 
 
 func update_shop_highlight(build_kind: int) -> void:
-	var kinds := [Tower.Kind.ARROW, Tower.Kind.CANNON, Tower.Kind.FROST, Tower.Kind.SNIPER, Tower.Kind.TESLA, Tower.Kind.FLAME, Tower.Kind.BOUNCE]
+	var kinds := [Tower.Kind.ARROW, Tower.Kind.CANNON, Tower.Kind.FROST, Tower.Kind.SNIPER, Tower.Kind.TESLA, Tower.Kind.FLAME, Tower.Kind.BOUNCE, Tower.Kind.POISON]
 	for i in range(shop_btns.size()):
 		var k: int = kinds[i]
 		var b: Button = shop_btns[i]

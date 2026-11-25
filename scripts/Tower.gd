@@ -3,7 +3,7 @@ class_name Tower
 ## 防御塔：7 种类型 × 3 个等级；满级（Lv.3）后从 3 个「变异」方向里选一个，决定最终形态。
 ## 升级只走金币路线（不提供塔对塔的合成）。
 
-enum Kind { ARROW, CANNON, FROST, SNIPER, TESLA, FLAME, BOUNCE }
+enum Kind { ARROW, CANNON, FROST, SNIPER, TESLA, FLAME, BOUNCE, POISON }
 
 enum Priority { FRONT, STRONG, WEAK, CLOSE }
 const PRIORITY_NAMES := ["最前", "最血多", "最血少", "最近"]
@@ -35,11 +35,14 @@ const MUZZLE_RATIO := {
 	Kind.TESLA: 0.92,
 	Kind.FLAME: 0.78,
 	Kind.BOUNCE: 0.86,
+	# 毒瓶塔的出手点是坩埚口（比塔身矮一截），瓶子从这里抛出去才对得上
+	Kind.POISON: 0.62,
 }
 
 ## 顶部武器会跟着目标走的塔：模型里带独立 Turret 节点，塔身不动、只有炮管/弩臂/发射槽转。
 ## 箭塔（靶心木屋）、冰塔（冰晶）、电塔（电球）、火塔（火盆）都是全向的，不需要转向。
-const AIMING := [Kind.CANNON, Kind.SNIPER, Kind.BOUNCE]
+## 毒瓶塔的 Turret 是「炼金师举着瓶子的那条手臂」，转起来像在瞄着往哪扔。
+const AIMING := [Kind.CANNON, Kind.SNIPER, Kind.BOUNCE, Kind.POISON]
 
 ## 转向速度：越大越快；14 大约 0.25 秒转 90°，看起来有份量又不拖沓
 const AIM_TURN := 14.0
@@ -238,6 +241,10 @@ func _recalc() -> void:
 	slow = float(d["slow"]) * (1.0 + TowerData.LV_SLOW_GROWTH * lv) * float(GameState.buffs["slow"])
 	chain = int(d.get("chain", 0))
 	dot = float(d.get("dot", 0.0)) * float(GameState.buffs["damage"])
+	# 毒瓶塔的 dot 就是毒池的每秒伤害，必须跟着等级一起长 ——
+	# 喷火塔的 dot 走的是「灼烧 tick」，一直是 Lv1 数值，两者别混用同一套口径。
+	if kind == Kind.POISON:
+		dot *= (1.0 + TowerData.LV_DMG_GROWTH * lv)
 	crit_bonus = 0.0
 
 	# 变异：在基础数值结算完之后再乘/加一层，保证卡牌 buff 和变异能叠加
@@ -839,6 +846,8 @@ func kind_suffix() -> String:
 			return "flame"
 		Kind.BOUNCE:
 			return "bounce"
+		Kind.POISON:
+			return "poison"
 		_:
 			return "arrow"
 
@@ -848,7 +857,7 @@ func _weapon() -> String:
 	match kind:
 		Kind.CANNON:
 			return "weapon-cannon"
-		Kind.FROST, Kind.TESLA, Kind.FLAME:
+		Kind.FROST, Kind.TESLA, Kind.FLAME, Kind.POISON:
 			return "weapon-turret"
 		_:
 			return "weapon-ballista"

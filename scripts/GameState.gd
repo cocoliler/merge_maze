@@ -20,6 +20,16 @@ var total_kills: int = 0
 var total_leaks: int = 0
 var best_wave: int = 0
 
+## 冰湖是否已经被凿穿（碎冰者第一次下水时置 true）。
+## 霜崽自己砸不开冰面：只有这张图上的冰面通过一次以后，它才会选水下路线。
+## 换图 / 重开都会走 reset()，所以这个标记天然按「一局一张图」重置。
+var ice_opened: bool = false
+
+## 跨地图继承：进入下一张地图前由 Main 写入，reset() 消费一次后清空（-1 = 不继承）。
+## 只带金币 / 生命 —— 塔和卡牌 buff 不继承，新地图从零布防。
+var carry_gold: int = -1
+var carry_lives: int = -1
+
 ## Roguelike 全局增益，卡牌会修改这里的值
 var buffs := {
 	"damage": 1.0,   # 伤害倍率
@@ -47,13 +57,16 @@ var buffs := {
 
 
 func reset() -> void:
-	gold = START_GOLD
-	lives = START_LIVES
+	gold = carry_gold if carry_gold >= 0 else START_GOLD
+	lives = carry_lives if carry_lives >= 0 else START_LIVES
+	carry_gold = -1
+	carry_lives = -1
 	wave = 0
 	running = true
 	wave_active = false
 	total_kills = 0
 	total_leaks = 0
+	ice_opened = false
 	buffs = {
 		"damage": 1.0,
 		"range": 1.0,

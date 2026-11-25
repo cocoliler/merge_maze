@@ -2,7 +2,7 @@ class_name EnemyData
 ## 敌人数值配置（外置数据文件）。调整血量/速度/奖励/颜色/描述只改这里。
 ## 注意：Kind 枚举顺序需与 Enemy.gd 中的 enum 保持完全一致。
 
-enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS }
+enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS, ICEBREAKER, FROSTWEAVER, FROSTLING }
 
 ## ---------------------------------------------------------------- 首领专属技能
 ## 技能逻辑在 Enemy._tick_boss_skill() 里，这里只管数值 —— 想调强度只改下面这些常量。
@@ -31,6 +31,17 @@ const BOSS_PULSE_TIME := 1.5
 const BOSS_ENRAGE_HASTE := 0.35
 const BOSS_ENRAGE_ARMOR := 0.10
 
+## ---------------------------------------------------------------- 霜语者的冰甲
+## 每 ICE_ARMOR_INTERVAL 秒，给 ICE_ARMOR_RADIUS 内的同伴套一层吸收伤害的护盾。
+## 护盾量按**挨打那只怪自己的最大生命**算 —— 不这么写的话，后期血量成长起来，
+## 冰甲就形同虚设（早期按固定值会过强，后期会过弱）。
+## 冰甲唯一的破绽是火：ICE_FIRE_MULT 倍于其它属性的「削甲速度」。
+const ICE_ARMOR_INTERVAL := 6.5
+const ICE_ARMOR_RADIUS := 6.5
+const ICE_ARMOR_RATIO := 0.30
+const ICE_ARMOR_TIME := 9.0
+const ICE_FIRE_MULT := 2.6
+
 ## size 是体型系数（程序化几何与外部模型的缩放都按它算身高）。
 ## 路面加宽到 3.2 世界单位后，原来 0.8~1.0 的体型在宽路上显小，
 ## 整体放大到约 1.45 倍；首领再额外拉高，撑满路面才有压迫感（大首领身宽≈路宽）。
@@ -47,4 +58,13 @@ const DATA := {
 	Kind.HEALER: {"name": "治疗怪", "hp": 90.0, "speed": 1.6, "reward": 15, "color": Color(0.40, 0.90, 0.55), "size": 1.45, "flying": false, "armor": 0.0, "heal": 12.0, "split": 0, "cloak": false, "desc": "持续治疗周围友军"},
 	Kind.SPLITTER: {"name": "分裂怪", "hp": 100.0, "speed": 1.9, "reward": 14, "color": Color(0.95, 0.60, 0.25), "size": 1.45, "flying": false, "armor": 0.0, "heal": 0.0, "split": 2, "cloak": false, "desc": "死亡后分裂成 2 个小兵"},
 	Kind.CLOAK: {"name": "隐身怪", "hp": 40.0, "speed": 2.6, "reward": 13, "color": Color(0.85, 0.85, 0.90), "size": 1.30, "flying": false, "armor": 0.0, "heal": 0.0, "split": 0, "cloak": true, "desc": "隐身，塔无法直接锁定（会被溅射/链式伤害打到）"},
+	# 冰原专属：不沿雪径走，而是砸开冰面横穿冻湖抄近路 —— 冰面上不能建塔，
+	# 所以湖对岸那半圈塔是打不到它的，必须靠湖边的塔补位。
+	Kind.ICEBREAKER: {"name": "碎冰者", "hp": 320.0, "speed": 1.25, "reward": 26, "color": Color(0.21, 0.37, 0.56), "size": 2.00, "flying": false, "armor": 0.15, "heal": 0.0, "split": 0, "cloak": false, "icebreak": true, "desc": "砸开冰面横穿冻湖的巨魔：冰面上不能建塔，湖对岸的火力拦不住它，得靠湖边的塔在它上岸时集火"},
+	# 冰原专属辅助：自己不打人，只负责给同伴套冰甲。先杀它，或者用喷火塔拆甲。
+	Kind.FROSTWEAVER: {"name": "霜语者", "hp": 150.0, "speed": 1.50, "reward": 22, "color": Color(0.46, 0.86, 0.80), "size": 1.55, "flying": false, "armor": 0.0, "heal": 0.0, "split": 0, "cloak": false, "iceshield": true, "desc": "给周围同伴套冰甲的萨满：冰甲按目标最大生命吸收伤害，火属性打上去破得快 2.6 倍 —— 喷火塔拆甲、其余塔补刀"},
+	# 冰原小怪：外形走贴图精灵（textures/enemy_frostling.png）。
+	# underwater = 能走水下段，但**自己砸不开冰面** —— 要等碎冰者先把湖凿穿，
+	# 它才跟着冰洞游过去；冰面没通时老老实实沿雪径绕湖。
+	Kind.FROSTLING: {"name": "霜崽", "hp": 52.0, "speed": 2.90, "reward": 11, "color": Color(1.0, 1.0, 1.0), "size": 1.05, "flying": false, "armor": 0.0, "heal": 0.0, "split": 0, "cloak": false, "underwater": true, "desc": "冰原小怪：体型小、跑得快；碎冰者凿穿冰面后，它会跟着从冰洞底下游过去抄近路"},
 }

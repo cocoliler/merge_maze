@@ -3,7 +3,7 @@ class_name Enemy
 ## 敌人：沿 GameGrid 生成的固定路线行进，支持减速、血条、漏怪扣血。
 ## 固定路线下建塔不会改变行进路径，所以战斗中不再重算；repath() 仅作兜底保留。
 
-enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS }
+enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS, ICEBREAKER, FROSTWEAVER, FROSTLING }
 
 const DATA := EnemyData.DATA
 
@@ -17,6 +17,13 @@ const DEATH_BLAST_RADIUS := 2.4
 
 const CLOAK_HIDDEN := 2.6
 const CLOAK_VISIBLE := 1.0
+
+## 碎冰者游泳：身体要**整个沉到冰面以下**（冰面是不透明的，只沉半截看起来就像在冰上滑行）。
+## 下沉量按身体实际高度算（_body_h + 0.25），见 _start_swim()；
+## SWIM_SPEED：水里比岸上慢 —— 游得比走得慢，玩家才有时间把塔调去它上岸的那一侧。
+const SWIM_SPEED := 0.78
+## 冰面比敌人脚下（SURFACE_Y）高这么多：暗影 / 波纹要贴在这个高度上才浮在冰面外侧
+const ICE_LIFT := 0.055
 
 ## 血条着色器。
 ## 为什么不直接用 scale.x 表示血量：
@@ -49,6 +56,23 @@ const BAR_SHADER := [
 	"}",
 ]
 
+## 冰甲外壳：菲涅尔边缘光。
+## 试过纯半透明的青色球壳，在雪原这种亮背景下几乎看不见（白底上叠 30% 的青 =
+## 一块脏白），所以改成「中间全透、只让轮廓发亮」——俯视角下就是一整圈冰蓝色光边，
+## 既能看清圈里有甲，又不会把怪糊住。
+const SHIELD_SHADER := [
+	"shader_type spatial;",
+	"render_mode unshaded, cull_disabled, blend_mix, depth_draw_never;",
+	"uniform vec3 rim_col : source_color = vec3(0.28, 0.86, 1.0);",
+	"uniform float rim_strength : hint_range(0.0, 1.0) = 0.9;",
+	"uniform float base_alpha : hint_range(0.0, 1.0) = 0.10;",
+	"void fragment() {",
+	"	float f = 1.0 - abs(dot(normalize(NORMAL), normalize(VIEW)));",
+	"	ALBEDO = rim_col;",
+	"	ALPHA = clamp(base_alpha + pow(f, 1.6) * rim_strength, 0.0, 1.0);",
+	"}",
+]
+
 var kind: int = Kind.GRUNT
 var max_hp: float = 1.0
 var hp: float = 1.0
@@ -60,6 +84,9 @@ var armor: float = 0.0          # 护甲：减伤比例（0~1）
 var heal: float = 0.0           # 治疗怪：每次治疗量
 var split: int = 0              # 分裂怪：死亡后分裂数量
 var cloak: bool = false         # 隐身怪：塔无法直接锁定
+var icebreak: bool = false      # 碎冰者：路线里含水路段，走到那里会砸冰下水游过去
+var underwater: bool = false    # 霜崽：能游水下段，但自己砸不开冰面（要等碎冰者先开路）
+var iceshield: bool = false     # 霜语者：会周期性给同伴套冰甲
 var slow_cap: float = 1.0       # 减速抗性：一次减速最多只能削到该比例（首领 < 1.0）
 var direct_target: Vector3 = Vector3.ZERO
 var regen: float = 0.0           # 精英词条：每秒回血
@@ -76,6 +103,27 @@ var _summoned: bool = false      # 半血召唤是否已触发
 var _heal_timer: float = 0.0
 var _cloaked: bool = false       # 隐身怪：当前是否处于隐身阶段
 var _cloak_timer: float = 0.0
+
+## 冰甲（霜语者给的护盾）：ice_shield > 0 时所有伤害先削它，
+## 火属性按 EnemyData.ICE_FIRE_MULT 倍削 —— 这是冰甲唯一的破绽。
+var ice_shield: float = 0.0
+var ice_shield_max: float = 0.0
+var _ice_shield_timer: float = 0.0
+var _shield_fx_cd: float = 0.0
+var _shield_dome: MeshInstance3D
+var _shield_mat: ShaderMaterial
+var _cast_timer: float = 0.0     # 霜语者的施法冷却
+
+## 碎冰者：path_world 里「水面段」的首尾下标（-1 = 整条路都不下水）。
+## path_world[0] 是出生点，所以调用方传进来的是 cells 的下标，这里统一 +1。
+var _swim_from: int = -1
+var _swim_to: int = -1
+var _swimming: bool = false
+var _body_h: float = 1.6        # 身体视觉高度（游泳下沉量按它算）
+var _swim_sink: float = 1.85    # 游泳时身体下沉多少：要沉到冰面以下
+var _wake: MeshInstance3D       # 游泳时冰面上那圈波纹
+var _swim_shadow: MeshInstance3D # 冰下暗影：冰面不透明，靠它 + 波纹圈读出它走到哪了
+var _wake_t: float = 0.0
 var _dot_dps: float = 0.0        # 燃烧：每秒伤害
 var _dot_timer: float = 0.0
 var _dot_tick: float = 0.0
@@ -106,6 +154,8 @@ var _body: Node3D
 var _bar_root: Node3D
 var _bar_mat: ShaderMaterial
 var _mat: StandardMaterial3D
+## 状态染色回落到哪个底色：程序化敌人是 DATA 里的 color，贴图精灵是白色（= 不改变原画）
+var _tint_base: Color = Color.WHITE
 var _cam: Camera3D
 
 var _marker_root: Node3D        # 首领头顶的悬浮标记
@@ -115,11 +165,16 @@ var _marker_t: float = 0.0
 
 # ---------------------------------------------------------------- 生成
 
-func spawn(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scale: float, wave: int) -> void:
-	_init_enemy(k, start_pos, world_path, hp_scale, wave, -1)
+## swim：碎冰者的「水面段」在 cells 里的首尾下标（Vector2i(-1,-1) = 全程不下水）。
+## 传 cells 下标而不是 path_world 下标，是因为调用方本来就是按格子算的；
+## 这里统一 +1 换成 path_world 下标（[0] 是出生点）。
+func spawn(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scale: float, wave: int,
+		swim: Vector2i = Vector2i(-1, -1)) -> void:
+	_init_enemy(k, start_pos, world_path, hp_scale, wave, -1, swim)
 
 
-func _init_enemy(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scale: float, wave: int, reward_override: int) -> void:
+func _init_enemy(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scale: float, wave: int,
+		reward_override: int, swim: Vector2i = Vector2i(-1, -1)) -> void:
 	kind = k
 	var d: Dictionary = DATA[k]
 	max_hp = float(d["hp"]) * hp_scale
@@ -130,6 +185,9 @@ func _init_enemy(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scal
 	else:
 		reward = int(round(float(d["reward"]) * Waves.reward_scale(wave)))
 	flying = bool(d.get("flying", false))
+	icebreak = bool(d.get("icebreak", false))
+	underwater = bool(d.get("underwater", false))
+	iceshield = bool(d.get("iceshield", false))
 	armor = float(d.get("armor", 0.0))
 	heal = float(d.get("heal", 0.0))
 	split = int(d.get("split", 0))
@@ -160,6 +218,12 @@ func _init_enemy(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scal
 	_armor_break_timer = 0.0
 	_vuln = 0.0
 	_vuln_timer = 0.0
+	ice_shield = 0.0
+	ice_shield_max = 0.0
+	_ice_shield_timer = 0.0
+	_shield_fx_cd = 0.0
+	# 霜语者登场先走一小段再开始施法：一出生就套甲玩家会认为是 bug
+	_cast_timer = 1.8 if iceshield else 0.0
 	slow_factor = 1.0
 	slow_timer = 0.0
 	slow_extra = 1.0
@@ -177,6 +241,13 @@ func _init_enemy(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scal
 	path_world = wp
 	path_idx = 0
 	progress = 0.0
+	# 水面段下标（path_world[0] 是出生点，所以要 +1）
+	_swim_from = -1
+	_swim_to = -1
+	_swimming = false
+	if swim.x >= 0 and swim.y >= swim.x:
+		_swim_from = swim.x + 1
+		_swim_to = swim.y + 1
 	if flying and world_path.size() > 0:
 		direct_target = world_path[world_path.size() - 1]
 	name = "%s" % d["name"]
@@ -356,8 +427,11 @@ func _build(d: Dictionary) -> void:
 	var col: Color = d["color"]
 	var s: float = float(d["size"])
 
+	# 霜崽用原画精灵（billboard 方片）；贴图没放进来时回退到程序化几何，工程永远能跑
+	var sprite_ok := kind == Kind.FROSTLING and _build_sprite_body(s)
+
 	# 优先用 res://models/enemies/enemy_<类型>.glb（放了模型就不再用程序化几何）
-	if not _build_custom_body(s):
+	if not sprite_ok and not _build_custom_body(s):
 		var mesh: Mesh
 		if kind == Kind.RUNNER:
 			var cm := CylinderMesh.new()
@@ -384,10 +458,12 @@ func _build(d: Dictionary) -> void:
 			sm.radial_segments = 12
 			mesh = sm
 
+		_body_h = mesh.get_aabb().size.y
 		var mi := MeshInstance3D.new()
 		mi.mesh = mesh
 		_mat = StandardMaterial3D.new()
 		_mat.albedo_color = col
+		_tint_base = col
 		_mat.roughness = 0.55
 		_mat.emission_enabled = true
 		_mat.emission = col
@@ -410,7 +486,11 @@ func _build(d: Dictionary) -> void:
 		bar_w = BAR_WIDTH * 1.5
 	# 血条离地高度跟着体型走：身体顶面大约在 0.85~1.03 倍体型处，
 	# 1.05*s+0.25 让大小怪的血条都贴着脑袋，不会因为放大而飘到半空。
-	_build_bar(1.05 * s + 0.25, bar_w)
+	# 霜崽是贴图精灵，头顶就是 _body_h，用同一套公式会飘出去一截。
+	var bar_y := 1.05 * s + 0.25
+	if kind == Kind.FROSTLING:
+		bar_y = _body_h + 0.20
+	_build_bar(bar_y, bar_w)
 
 	if kind == Kind.SHIELD:
 		_build_shield_ring(s)
@@ -424,6 +504,39 @@ func _build(d: Dictionary) -> void:
 		_build_boss_marker(s, Color(1.0, 0.64, 0.24), "MINI BOSS")
 	if not elites.is_empty():
 		_build_elite_ring(s)
+
+
+## 贴图精灵外观：把 res://textures/enemy_frostling.png 贴在一张永远正对镜头的方片上。
+## 为什么不用模型：这张原画是「已经打好光的成品精灵」，贴到球 / 立方体上会被二次打光、
+## 边缘糊成一团；billboard 方片能原样还原，而且只有 1 个 draw call。
+## 透明用 ALPHA_SCISSOR 而不是 ALPHA：半透明材质会被排进透明队列、不写深度，
+## 下沉到冰面下的身体会从冰面里透出来（碎冰者那套「完全沉下去」的观感就毁了）。
+func _build_sprite_body(s: float) -> bool:
+	var tex := TextureLib.get_texture("enemy_frostling")
+	if tex == null:
+		return false
+	var h: float = 0.95 * s
+	_body_h = h
+	var quad := MeshInstance3D.new()
+	quad.name = "Sprite"
+	var qm := QuadMesh.new()
+	qm.size = Vector2(h, h)
+	quad.mesh = qm
+	_mat = StandardMaterial3D.new()
+	_mat.albedo_texture = tex
+	_mat.albedo_color = Color.WHITE
+	_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	_mat.alpha_scissor_threshold = 0.45
+	_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	quad.material_override = _mat
+	quad.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# 方片原点在正中：抬到「底边贴地」
+	quad.position.y = h * 0.5
+	_body.add_child(quad)
+	_tint_base = Color.WHITE
+	return true
 
 
 ## 当前敌人类型对应的贴图槽位后缀
@@ -452,6 +565,7 @@ func _build_custom_body(s: float) -> bool:
 		target_h = 0.95 * s
 	var k := target_h / cur_h
 	model.scale = base * Vector3(k, k, k)
+	_body_h = target_h
 	# 让模型底部贴地（y=0）、水平居中到格子中心
 	var c := box.get_center()
 	model.position = Vector3(-c.x * base.x * k, -box.position.y * base.y * k, -c.z * base.z * k)
@@ -477,6 +591,12 @@ func slot_suffix() -> String:
 			return "healer"
 		Kind.SPLITTER:
 			return "splitter"
+		Kind.ICEBREAKER:
+			return "icebreaker"
+		Kind.FROSTWEAVER:
+			return "frostweaver"
+		Kind.FROSTLING:
+			return "frostling"
 		_:
 			return "grunt"
 
@@ -639,6 +759,7 @@ func _process(delta: float) -> void:
 	if not _dying:
 		_face_bar_to_camera()
 		_animate_boss_marker(delta)
+		_animate_wake(delta)
 	if not GameState.running or _dying:
 		return
 
@@ -663,6 +784,7 @@ func _process(delta: float) -> void:
 	_tick_haste(delta)
 	if is_boss():
 		_tick_boss_skill(delta)
+	_tick_ice_armor(delta)
 
 	if heal > 0.0:
 		_heal_timer -= delta
@@ -692,7 +814,8 @@ func _process(delta: float) -> void:
 		_dot_tick -= delta
 		if _dot_tick <= 0.0:
 			_dot_tick = 0.5
-			take_damage(_dot_dps * 0.5, false, false)
+			# 灼烧本身也是火：打冰甲时同样按火属性加速破甲
+			take_damage(_dot_dps * 0.5, false, false, "fire")
 		if _dot_timer <= 0.0:
 			# 烧完了：清掉状态并还原外观（可能还带着冰塔的减速蓝色）
 			_dot_dps = 0.0
@@ -749,17 +872,22 @@ func _process(delta: float) -> void:
 	if path_idx >= path_world.size():
 		return
 
+	_update_swim_state()
+
 	var dest: Vector3 = path_world[path_idx]
 	var dir := dest - global_position
 	dir.y = 0.0
 	var dist := dir.length()
-	var step := base_speed * slow_factor * slow_extra * (1.0 + _haste) * delta
+	# 游泳比走路慢：玩家有时间把塔的火力挪到它上岸的那一侧
+	var spd := base_speed * (SWIM_SPEED if _swimming else 1.0)
+	var step := spd * slow_factor * slow_extra * (1.0 + _haste) * delta
 
 	if dist <= step:
 		progress += dist
 		if dist > 0.0001:
 			global_position += dir.normalized() * dist
 		path_idx += 1
+		_update_swim_state()
 		if path_idx >= path_world.size():
 			_leak()
 			return
@@ -769,12 +897,323 @@ func _process(delta: float) -> void:
 
 	if dist > 0.0001:
 		_body.rotation.y = atan2(dir.x, dir.z)
-	# 轻微上下浮动
-	_body.position.y = sin(progress * 3.0) * 0.06
+	# 岸上轻微上下浮动；游泳时整个身体沉到冰面以下（冰面不透明，露半截就像在冰上滑），
+	# 冰面上只剩 _wake 波纹圈 + _swim_shadow 暗影告诉玩家它游到哪了。
+	if _swimming:
+		_body.position.y = -_swim_sink + sin(progress * 2.0) * 0.05
+	else:
+		_body.position.y = sin(progress * 3.0) * 0.06
+
+# ---------------------------------------------------------------- 破冰 / 游泳
+
+## 根据「下一个路点」判断是不是走在水面上，只在状态翻转时触发一次特效。
+## 路线是 GameGrid.swim_route_home() 给的（穿过湖面的最短路），
+## 水面段首尾下标见 _swim_from / _swim_to。
+func _update_swim_state() -> void:
+	if not icebreak and not underwater:
+		return
+	var now := _swim_from >= 0 and path_idx >= _swim_from and path_idx <= _swim_to
+	if now == _swimming:
+		return
+	if now:
+		_start_swim()
+	else:
+		_end_swim()
+
+
+## 到岸了：一拳砸开冰面下水。冰面是静态几何，砸不出真正的洞，
+## 所以用「碎冰序列帧 + 一圈白冰碴冲击环 + 原地留一个深色冰洞」来表现。
+func _start_swim() -> void:
+	_swimming = true
+	# 沉到冰面以下：头顶也得在水面下，否则俯视角看就是「站在冰上滑」。
+	# 0.25 是余量，保证身体顶端低于冰面（冰面在脚下 +ICE_LIFT）。
+	_swim_sink = _body_h + 0.25
+	if _wake == null:
+		_build_wake()
+	if _wake != null:
+		_wake_t = 0.0
+		_wake.visible = true
+	if _swim_shadow != null:
+		_swim_shadow.visible = true
+	# 冰面是碎冰者砸开的：霜崽只是「跟着从现成的冰洞游过去」，不再重复砸一次冰。
+	# 顺手把「湖已经通了」记到全局 —— 后面的霜崽生成时才敢走水下路线。
+	if not icebreak:
+		var par := get_parent()
+		if par != null:
+			Fx.ring(par, global_position, Color(0.86, 0.98, 1.0), 1.6, 0.35)
+			Sound.play("hit", -14.0)
+		return
+	GameState.ice_opened = true
+	var parent := get_parent()
+	var p := global_position
+	# 冰洞砸在「它和下一格水面之间」，而不是脚下，看起来才是破开冰往前走
+	var nxt := p
+	if path_idx < path_world.size():
+		nxt = path_world[path_idx]
+	var hole := Vector3((p.x + nxt.x) * 0.5, p.y, (p.z + nxt.z) * 0.5)
+	if not Fx.burst_seq(parent, hole + Vector3(0.0, 0.3, 0.0), "fx_ice", 2, 3.2, 0.5, 0.16,
+			Color(0.62, 0.92, 1.0), Color(0.92, 0.99, 1.0)):
+		Fx.flash(parent, hole + Vector3(0.0, 0.35, 0.0), Color(0.85, 0.97, 1.0), 1.1, 0.28)
+	Fx.ring(parent, hole, Color(0.88, 0.99, 1.0), 3.0, 0.5)
+	Fx.ring(parent, hole, Color(0.30, 0.72, 0.92), 1.9, 0.7)
+	_spawn_ice_hole(hole)
+	Sound.play("explosion", -12.0)
+
+
+## 爬上对岸：溅一下水，身体重新站直
+func _end_swim() -> void:
+	_swimming = false
+	if _wake != null:
+		_wake.visible = false
+	if _swim_shadow != null:
+		_swim_shadow.visible = false
+	var parent := get_parent()
+	var p := global_position
+	if not Fx.burst_seq(parent, p + Vector3(0.0, 0.3, 0.0), "fx_ice", 2, 2.4, 0.4, 0.14,
+			Color(0.72, 0.95, 1.0)):
+		Fx.flash(parent, p + Vector3(0.0, 0.3, 0.0), Color(0.86, 0.98, 1.0), 0.8, 0.22)
+	Fx.ring(parent, p, Color(0.90, 0.99, 1.0), 2.2, 0.45)
+	Sound.play("hit", -8.0)
+
+
+## 冰面上的窟窿：一块深色水面 + 一圈白冰碴。挂在敌人根节点下，
+## 波次 / 换图时随场景一起清掉，不用自己管生命周期。
+func _spawn_ice_hole(p: Vector3) -> void:
+	var parent := get_parent()
+	if parent == null:
+		return
+	var r := 0.85 + 0.22 * float(DATA[kind]["size"])
+	var y := p.y + 0.07     # 比冰面（水面 + 0.02）再高一点点，免得和冰面 z-fighting
+
+	var disc := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = r
+	cm.bottom_radius = r
+	cm.height = 0.02
+	cm.radial_segments = 16
+	disc.mesh = cm
+	var dmat := StandardMaterial3D.new()
+	dmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	dmat.albedo_color = Color(0.04, 0.30, 0.42, 0.95)
+	dmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	disc.material_override = dmat
+	disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(disc)
+	disc.global_position = Vector3(p.x, y, p.z)
+
+	var rim := MeshInstance3D.new()
+	var tm := TorusMesh.new()
+	tm.inner_radius = r * 0.92
+	tm.outer_radius = r * 1.08
+	tm.rings = 20
+	tm.ring_segments = 5
+	rim.mesh = tm
+	rim.rotation_degrees = Vector3(90.0, 0.0, 0.0)
+	var rmat := StandardMaterial3D.new()
+	rmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	rmat.albedo_color = Color(0.86, 0.97, 1.0, 0.9)
+	rmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	rmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	rim.material_override = rmat
+	rim.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(rim)
+	rim.global_position = Vector3(p.x, y, p.z)
+
+
+## 游泳时贴在水面上的波纹环（省掉每帧新建特效节点）
+func _build_wake() -> void:
+	var s := float(DATA[kind]["size"])
+	_wake = MeshInstance3D.new()
+	var tm := TorusMesh.new()
+	tm.inner_radius = 0.52 * s
+	tm.outer_radius = 0.70 * s
+	tm.rings = 24
+	tm.ring_segments = 6
+	_wake.mesh = tm
+	_wake.rotation_degrees = Vector3(90.0, 0.0, 0.0)
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(0.84, 0.99, 1.0, 0.5)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.emission_enabled = true
+	mat.emission = Color(0.68, 0.94, 1.0)
+	mat.emission_energy_multiplier = 0.35
+	_wake.material_override = mat
+	_wake.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# 挂在 self 上（不是 _body）：身体会沉下去，波纹得留在水面高度
+	_wake.position.y = ICE_LIFT + 0.005
+	_wake.visible = false
+	add_child(_wake)
+
+	# 冰下暗影：冰面不透明，人整个沉下去以后就只剩这块贴冰面的暗影 + 上面的波纹圈
+	# 能告诉玩家它走到哪了 —— 没有它就成了「怪物凭空消失」。
+	_swim_shadow = MeshInstance3D.new()
+	var disc := CylinderMesh.new()
+	disc.top_radius = 0.74 * s
+	disc.bottom_radius = 0.74 * s
+	disc.height = 0.012
+	disc.radial_segments = 20
+	_swim_shadow.mesh = disc
+	var dmat := StandardMaterial3D.new()
+	dmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	dmat.albedo_color = Color(0.03, 0.20, 0.32, 0.52)
+	dmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_swim_shadow.material_override = dmat
+	_swim_shadow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_swim_shadow.position.y = ICE_LIFT - 0.004    # 压在波纹圈下面一点，浮在冰面外侧
+	_swim_shadow.visible = false
+	add_child(_swim_shadow)
+
+
+## 波纹轻微一张一缩，静止的圆环看不出「在动」
+func _animate_wake(delta: float) -> void:
+	if _wake == null or not is_instance_valid(_wake):
+		return
+	if not _wake.visible:
+		return
+	_wake_t += delta
+	var k := 1.0 + sin(_wake_t * 3.4) * 0.10
+	_wake.scale = Vector3(k, 1.0, k)
+
+# ---------------------------------------------------------------- 冰甲（霜语者）
+
+## 每帧推进两件事：霜语者的施法冷却、以及冰甲的剩余时长。
+func _tick_ice_armor(delta: float) -> void:
+	if _cast_timer > 0.0:
+		_cast_timer -= delta
+		if _cast_timer <= 0.0:
+			_cast_timer = float(EnemyData.ICE_ARMOR_INTERVAL) if iceshield else 0.0
+			if iceshield:
+				_ice_armor_aura()
+	if _ice_shield_timer > 0.0:
+		_ice_shield_timer -= delta
+		if _ice_shield_timer <= 0.0 and ice_shield > 0.0:
+			# 到期自然融化，和被打碎走同一套表现
+			_break_shield()
+	if _shield_fx_cd > 0.0:
+		_shield_fx_cd -= delta
+
+
+## 霜语者的光环：给半径内**还没甲**的非首领同伴套一层冰甲。
+## 自己不套 —— 「先点掉那个萨满」才是这一波的解法。
+func _ice_armor_aura() -> void:
+	var radius := float(EnemyData.ICE_ARMOR_RADIUS)
+	var ratio := float(EnemyData.ICE_ARMOR_RATIO)
+	var dur := float(EnemyData.ICE_ARMOR_TIME)
+	var cast := 0
+	for e in get_tree().get_nodes_in_group("enemies"):
+		if e == null or not is_instance_valid(e) or e == self:
+			continue
+		if e.global_position.distance_to(global_position) > radius:
+			continue
+		if e.is_boss() or not e.has_method("grant_ice_shield"):
+			continue
+		if e.has_ice_shield():
+			continue
+		e.grant_ice_shield(e.max_hp * ratio, dur)
+		cast += 1
+	var parent := get_parent()
+	if parent == null:
+		return
+	# 不管有没有套到人，施法本身都要看得见：一圈冰环从法杖扩散出去
+	Fx.ring(parent, global_position + Vector3(0.0, 1.05, 0.0), Color(0.55, 0.92, 1.0),
+		radius * 0.55, 0.55)
+	Fx.flash(parent, global_position + Vector3(0.30, 1.30, 0.15),
+		Color(0.78, 0.97, 1.0), 0.75, 0.30)
+	if cast > 0:
+		Sound.play("levelup", -12.0)
+
+
+## 套冰甲：已有的不叠加，只把数值补到更高、时长刷新。
+## 护盾量由调用方按「挨打那只怪的最大生命」算，所以它能跟着波次血量成长。
+func grant_ice_shield(amount: float, duration: float) -> void:
+	if _dying or amount <= 0.0:
+		return
+	if _shield_dome == null:
+		_build_shield_dome()
+	ice_shield = maxf(ice_shield, amount)
+	ice_shield_max = maxf(ice_shield_max, ice_shield)
+	_ice_shield_timer = maxf(_ice_shield_timer, duration)
+	_update_shield_dome()
+
+
+func has_ice_shield() -> bool:
+	return ice_shield > 0.0
+
+
+## 冰甲外形：一层边缘发亮的冰蓝球壳（材质见 SHIELD_SHADER）。
+func _build_shield_dome() -> void:
+	var s := float(DATA[kind]["size"])
+	var mi := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.72 * s
+	sm.height = 1.24 * s
+	sm.radial_segments = 18
+	sm.rings = 10
+	mi.mesh = sm
+	var sh := Shader.new()
+	sh.code = "\n".join(SHIELD_SHADER)
+	_shield_mat = ShaderMaterial.new()
+	_shield_mat.shader = sh
+	mi.material_override = _shield_mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.position.y = 0.55 * s
+	mi.visible = false
+	add_child(mi)
+	_shield_dome = mi
+
+
+## 甲越薄轮廓越暗、越小：玩家不看数字也能判断还剩多少
+func _update_shield_dome() -> void:
+	if _shield_dome == null or _shield_mat == null or not is_instance_valid(_shield_dome):
+		return
+	if ice_shield <= 0.0:
+		_shield_dome.visible = false
+		return
+	var ratio := clampf(ice_shield / maxf(ice_shield_max, 0.001), 0.0, 1.0)
+	_shield_dome.visible = true
+	_shield_mat.set_shader_parameter("rim_strength", 0.25 + 0.55 * ratio)
+	_shield_mat.set_shader_parameter("base_alpha", 0.04 + 0.10 * ratio)
+	var k := 0.90 + 0.10 * ratio
+	_shield_dome.scale = Vector3(k, k, k)
+
+
+## 破甲：碎冰序列帧 + 冲击环 + 一声脆响（到期自然融化也走这里）
+func _break_shield() -> void:
+	ice_shield = 0.0
+	if _shield_dome != null and is_instance_valid(_shield_dome):
+		_shield_dome.visible = false
+	var parent := get_parent()
+	if parent == null:
+		return
+	var s := float(DATA[kind]["size"])
+	var p := global_position + Vector3(0.0, 0.55 * s, 0.0)
+	if not Fx.burst_seq(parent, p, "fx_ice", 2, 2.6, 0.42, 0.14,
+			Color(0.65, 0.94, 1.0), Color(0.95, 1.0, 1.0)):
+		Fx.flash(parent, p, Color(0.80, 0.97, 1.0), 0.9, 0.22)
+	Fx.ring(parent, global_position, Color(0.70, 0.95, 1.0), 1.8, 0.4)
+	Sound.play("hit", -6.0)
+
+
+## 甲被打中的反馈：火是「嗤」的一下白汽，其它属性是冰蓝小闪光。
+## 用冷却压一下 —— 喷火塔 3 发/秒，每发都放会糊屏。
+func _shield_hit_fx(element: String, dmg: float) -> void:
+	if _shield_fx_cd > 0.0 or dmg < 1.0:
+		return
+	_shield_fx_cd = 0.14
+	var parent := get_parent()
+	if parent == null:
+		return
+	var col := Color(1.0, 0.98, 0.92) if element == "fire" else Color(0.70, 0.95, 1.0)
+	Fx.flash(parent, global_position + Vector3(0.0, 0.7, 0.0), col, 0.45, 0.14)
 
 # ---------------------------------------------------------------- 受击
 
-func take_damage(amount: float, crit: bool = false, show_number: bool = true) -> void:
+## element：伤害属性（"" = 物理，"fire" = 火）。目前只有冰甲关心它 ——
+## 火属性削冰甲时 ×EnemyData.ICE_FIRE_MULT，其它属性 1 倍。
+func take_damage(amount: float, crit: bool = false, show_number: bool = true,
+		element: String = "") -> void:
 	if _dying:
 		return
 	# 破甲先扣护甲，易伤再放大伤害：两个都只影响「这一次命中之后」的攻击
@@ -783,6 +1222,27 @@ func take_damage(amount: float, crit: bool = false, show_number: bool = true) ->
 		amount *= (1.0 - eff_armor)
 	if _vuln > 0.0:
 		amount *= 1.0 + _vuln
+
+	# 冰甲：全额吸收，火属性按倍率加速拆除。吸收完还有富余才轮到血量，
+	# 富余部分要除以倍率还原——否则火塔能「顺便」把血也打掉一截。
+	if ice_shield > 0.0:
+		var mul := float(EnemyData.ICE_FIRE_MULT) if element == "fire" else 1.0
+		var on_shield := amount * mul
+		if on_shield < ice_shield:
+			ice_shield -= on_shield
+			_update_shield_dome()
+			_shield_hit_fx(element, on_shield)
+			if show_number and on_shield >= 8.0:
+				Fx.damage_number(get_parent(), global_position + Vector3(0.0, 0.9, 0.0),
+					str(int(round(on_shield))), Color(0.60, 0.94, 1.0), false)
+			return
+		var overflow := (on_shield - ice_shield) / mul
+		ice_shield = 0.0
+		_break_shield()
+		amount = overflow
+		if amount <= 0.0:
+			return
+
 	hp -= amount
 	_update_bar()
 	if crit and _mat != null:
@@ -964,12 +1424,12 @@ func _update_tint() -> void:
 		_mat.emission_energy_multiplier = 0.60
 	else:
 		var d: Dictionary = DATA[kind]
-		_mat.albedo_color = d["color"]
-		_mat.emission = d["color"]
+		_mat.albedo_color = _tint_base
+		_mat.emission = _tint_base
 		_mat.emission_energy_multiplier = 0.12
 		if _enraged:
 			# 狂暴：底色压向暗红并常亮，一眼看出大首领进入了第二阶段
-			var base_col: Color = d["color"]
+			var base_col: Color = _tint_base
 			_mat.albedo_color = base_col.lerp(Color(1.0, 0.18, 0.22), 0.55)
 			_mat.emission = Color(1.0, 0.25, 0.30)
 			_mat.emission_energy_multiplier = 0.95

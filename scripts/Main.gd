@@ -25,6 +25,10 @@ const CAM_BACK_RATIO := 18.0 / 21.0
 const PAN_SPEED := 22.0     # 键盘平移速度（世界单位/秒）
 const ZOOM_STEP := 1.15     # 每格滚轮缩放倍率
 
+## 当前地图 id（MapDefs.MAPS 的键）。场景文件里不写这个值 —— 切地图靠
+## MapDefs.pending_id 传递，_ready() 归一化后写回这里，之后 UI / 切换器都读它。
+@export var map_id: String = ""
+
 var grid: GameGrid
 var towers_root: Node3D
 var enemies_root: Node3D
@@ -56,6 +60,9 @@ var _wave_kills_start: int = 0
 var _wave_leaks_start: int = 0
 var _preview_wave: int = -1        # 缓存的「下一波预告」对应波次
 var _preview_text: String = ""     # 缓存的预告文本（避免每帧重建数组 + 洗牌）
+var _ice_hint_wave: int = -1        # 碎冰者的「下水」提示：每波只闪一次
+var _weaver_hint_wave: int = -1     # 霜语者的提示：同样每波只闪一次
+var _spawnling_hint_wave: int = -1  # 霜崽「跟着冰洞游过去」的提示：每波只闪一次
 var _info_hold: float = 0.0        # >0 时暂停 _update_info 覆盖，用于显示一次性提示
 var _pending_unlock_msg: String = ""  # 波次结束后待提示的「新解锁」信息（等卡牌面板关掉再显示）
 var _fullscreen: bool = false
@@ -64,6 +71,19 @@ var _fullscreen: bool = false
 
 func _ready() -> void:
 	randomize()
+	# —— 地图选择：所有地图共用 scenes/Main.tscn，目标地图靠 MapDefs.pending_id 传进来
+	# （change_scene_to_file 不能带参数），读完立刻清空，避免下次重开误进同一张图。
+	# 命令行也能直进某张图（开发用，注意 -- 之后才是游戏参数）：
+	#   godot --path . -- --map=ashfall
+	for a in OS.get_cmdline_user_args():
+		if str(a).begins_with("--map="):
+			map_id = str(a).substr(6)
+	map_id = MapDefs.resolve_id(map_id)
+	MapDefs.pending_id = ""
+	# 切场景时继承上一局的倍速 / 暂停状态没有任何意义，而且会直接卡住新场景
+	Engine.time_scale = 1.0
+	game_speed = 1.0
+	get_tree().paused = false
 	GameState.reset()
 	GameState.load_save()
 	Fx.reset_counters()
@@ -77,6 +97,7 @@ func _ready() -> void:
 
 	grid = GameGrid.new()
 	grid.name = "Grid"
+	grid.map_id = map_id          # 必须在 add_child 之前：GameGrid._ready() 里就要读地图数据
 	add_child(grid)
 
 	# 注意：Main 本身是 PROCESS_MODE_ALWAYS（暂停时还要处理相机 / ESC），
@@ -105,6 +126,9 @@ func _ready() -> void:
 	GameState.wave_changed.connect(_on_stat_changed)
 
 	ui.refresh()
+
+	print("[Main] 地图 %s（%s）：%d 条路线 / %d 个布防台" % [
+		map_id, MapDefs.name_of(map_id), grid.lanes.size(), grid.build_slots.size()])
 
 	var slots := TextureLib.slot_list()
 	if slots.size() > 0:
@@ -145,11 +169,13 @@ func _build_environment() -> void:
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 		env.ambient_light_energy = 1.0
 	else:
+		# 天色跟着地图走：裂谷是冷蓝夜，灰烬荒原是暖褐的尘雾
+		var env_def: Dictionary = MapDefs.get_map(map_id).get("env", {})
 		env.background_mode = Environment.BG_COLOR
-		env.background_color = Color(0.045, 0.055, 0.085)
+		env.background_color = env_def.get("bg", Color(0.045, 0.055, 0.085))
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-		env.ambient_light_color = Color(0.34, 0.42, 0.60)
-		env.ambient_light_energy = 0.65
+		env.ambient_light_color = env_def.get("ambient", Color(0.34, 0.42, 0.60))
+		env.ambient_light_energy = float(env_def.get("ambient_energy", 0.65))
 
 	env.glow_enabled = true
 	env.glow_intensity = 0.35
@@ -229,6 +255,7 @@ func _build_lights() -> void:
 	add_child(sun)
 	sun.rotation_degrees = Vector3(-58.0, 32.0, 0.0)
 	sun.light_energy = 1.15
+	sun.light_color = MapDefs.get_map(map_id).get("env", {}).get("sun", Color(1.0, 0.97, 0.92))
 	sun.shadow_enabled = true
 	sun.directional_shadow_max_distance = 60.0
 
@@ -378,10 +405,20 @@ func _unhandled_input(event: InputEvent) -> void:
 				ui.hide_mutations()
 			elif ui != null and ui.codex_visible():
 				ui.hide_codex()
+			elif ui != null and ui.map_switch_visible():
+				ui.toggle_map_switch()
+			elif ui != null and ui.god_visible():
+				ui.toggle_god()
 			elif build_kind >= 0:
 				set_build_kind(-1)
 			else:
 				toggle_pause()
+		elif event.keycode == KEY_F1:
+			if ui != null:
+				ui.toggle_map_switch()
+		elif event.keycode == KEY_F2:
+			if ui != null:
+				ui.toggle_god()
 		elif event.keycode == KEY_Q:
 			if selected != null and is_instance_valid(selected):
 				selected.cycle_priority()
@@ -476,6 +513,13 @@ func _on_left_press() -> void:
 		left_dragging = false
 		_left_press_pos = mp
 		_left_anchor = p
+		return
+
+	# 上帝模式：面板开着时左键 = 在点到的格子上刷怪。这里**先于**建造 / 选中处理，
+	# 也不进入平移拖动 —— 一次点击就是一发出怪，拖拽平移交给中键。
+	if ui != null and ui.god_visible():
+		if grid.in_bounds(c):
+			debug_spawn_at(ui.god_kind(), c, ui.god_count, ui.god_hp)
 		return
 
 	if build_kind >= 0:
@@ -742,7 +786,7 @@ func start_wave() -> void:
 	GameState.set_wave(GameState.wave + 1)
 	_wave_kills_start = GameState.total_kills
 	_wave_leaks_start = GameState.total_leaks
-	spawn_queue = Waves.plan(GameState.wave)
+	spawn_queue = Waves.plan(GameState.wave, _wave_opts())
 	spawn_timer = 0.7
 	spawn_cursor = randi()
 	_clear_selection()
@@ -763,9 +807,20 @@ func _spawn_next() -> void:
 	if spawns.size() > 1 and randf() > 0.25:
 		spawn_cursor += 1
 	var c: Vector2i = spawns[spawn_cursor % spawns.size()]
+	# 碎冰者不走雪径：它自己挑一条「穿过湖面」的最短路，
+	# swim 告诉 Enemy 哪一段在水里（下标按 cells 算，Enemy 内部再 +1 对上 path_world）。
+	# 霜崽自己砸不开冰面：只有这张图的冰湖已经被碎冰者凿开过，它才跟着走水下段。
+	var cells := grid.path_home_cells_from(c)
+	var swim := Vector2i(-1, -1)
+	if k == Enemy.Kind.ICEBREAKER or (k == Enemy.Kind.FROSTLING and GameState.ice_opened):
+		var route := grid.swim_route_home(c)
+		if not route.is_empty() and int(route.get("from", -1)) >= 0:
+			cells = route["cells"]
+			swim = Vector2i(int(route["from"]), int(route["to"]))
 	var e := Enemy.new()
 	enemies_root.add_child(e)
-	e.spawn(k, grid.spawn_world_for(c), grid.path_home_world_from(c), Waves.hp_scale(GameState.wave), GameState.wave)
+	e.spawn(k, grid.spawn_world_for(c), grid.cells_to_world(cells),
+		Waves.hp_scale(GameState.wave), GameState.wave, swim)
 	# 首领登场：信息面板闪现提示，玩家不会漏看
 	if k == Enemy.Kind.BOSS:
 		_flash_info("大首领出现了！会放压制脉冲让周围塔熄火，半血后狂暴并召唤援军 —— 别把防线堆在它身边")
@@ -773,6 +828,34 @@ func _spawn_next() -> void:
 	elif k == Enemy.Kind.MINI_BOSS:
 		_flash_info("小首领出现了！战吼会给周围小怪加速，半血召唤援军 —— 先集火它")
 		Sound.play("wave")
+	elif k == Enemy.Kind.ICEBREAKER and _ice_hint_wave != GameState.wave:
+		# 每波只提示第一次，不然一次来 4 只会把信息面板刷屏
+		_ice_hint_wave = GameState.wave
+		_flash_info("碎冰者下水了！它会砸开冰面横穿冻湖，冰面上没有塔位 —— 把火力挪到它上岸的那一侧")
+	elif k == Enemy.Kind.FROSTWEAVER and _weaver_hint_wave != GameState.wave:
+		_weaver_hint_wave = GameState.wave
+		_flash_info("霜语者出现了！它会给周围同伴套冰甲，护甲能吃下大量伤害 —— 先用喷火塔烧甲，或者直接点掉它")
+	elif k == Enemy.Kind.FROSTLING and GameState.ice_opened and _spawnling_hint_wave != GameState.wave:
+		# 冰面没通时它和小兵没区别，不值得提示；跟着冰洞下水才是这一只的特色
+		_spawnling_hint_wave = GameState.wave
+		_flash_info("霜崽跟着冰洞游过来了！冰面一旦被凿开，它们就会从水下抄近路过湖 —— 湖岸两侧都得留火力")
+
+
+## 本图的波次开关（喂给 Waves.plan / Waves.preview）：完全由地图数据决定。
+## 不写死地图 id —— 以后再加一张有冰湖的图，只要在 MapDefs 里打个标记就行。
+func _wave_opts() -> Dictionary:
+	var opts := {}
+	if grid == null:
+		return opts
+	var md: Dictionary = grid.map_def
+	# 碎冰者要有水面才成立（没水的图它连「抄近路」都无从谈起）
+	if bool(md.get("icebreaker", false)) and grid.has_water():
+		opts["icebreaker"] = true
+		# 霜崽是碎冰者的「跟班」：它得等冰面被凿开才能下水，所以只在同一张冰图上出现
+		opts["frostling"] = true
+	if bool(md.get("frostweaver", false)):
+		opts["frostweaver"] = true
+	return opts
 
 
 func _end_wave() -> void:
@@ -804,7 +887,8 @@ func _end_wave() -> void:
 		GameState.best_wave = maxi(GameState.best_wave, GameState.wave)
 		GameState.save_best()
 		ui.set_wave_busy(false)
-		ui.show_end(true)
+		# 第十波守住后如果还有下一张地图，结算面板上就多一个「前往」按钮
+		ui.show_end(true, MapDefs.next_id(map_id))
 		return
 
 	# 下一波解锁的新塔：等卡牌面板关掉后再提示，避免被面板挡住
@@ -850,6 +934,33 @@ func choose_card(id: String) -> void:
 	ui.refresh()
 	_show_pending_unlock()
 	Sound.play("levelup")
+
+# ---------------------------------------------------------------- 地图切换
+
+## 切换到指定地图：重载唯一的游戏场景，目标地图靠 MapDefs.pending_id 传递。
+## carry = true 时把金币 / 生命带到新地图（打完第 10 波「前往」走这条）；
+## 开发用的地图切换器走 carry = false，等于重开一张干净的图。
+func go_to_map(id: String, carry: bool = false) -> void:
+	if not MapDefs.has(id):
+		push_warning("Main: 未知地图 id = %s" % id)
+		return
+	if carry:
+		GameState.carry_gold = GameState.gold
+		GameState.carry_lives = GameState.lives
+	MapDefs.pending_id = id
+	get_tree().paused = false
+	Engine.time_scale = 1.0
+	get_tree().change_scene_to_file(MapDefs.MAIN_SCENE)
+
+
+## 结算面板的「前往新地图」：只有存在下一张图时才跳转，并继承金币 / 生命
+func go_to_next_map() -> void:
+	var nid: String = MapDefs.next_id(map_id)
+	if nid == "":
+		_flash_info("已经是最后一张地图了")
+		return
+	go_to_map(nid, true)
+
 
 # ---------------------------------------------------------------- 测试工具
 
@@ -915,6 +1026,48 @@ func _debug_clear_units() -> void:
 				c.queue_free()
 
 
+## 上帝模式：在**任意格子**刷怪（面板由 GameUI 提供，F2 开关）。
+##
+## 不需要路线格：path_home_cells_from() 对非路线格会挑「离它最近的那一格路线」，
+## 从那里顺着 lane 回家，所以点水面 / 岩石 / 塔旁边都能出怪。
+## 血量 = 当前波次成长 × 面板上的倍率，用来现场压测某座塔的输出够不够。
+func debug_spawn_at(kind: int, c: Vector2i, count: int = 1, hp_mult: float = 1.0) -> int:
+	if grid == null or game_over or not grid.in_bounds(c):
+		return 0
+	var cells := grid.path_home_cells_from(c)
+	if cells.is_empty():
+		return 0
+	# 碎冰者沿雪径走、只在湖面那一段砸冰抄近道 —— 路线由 swim_route_home() 给。
+	# 没水的图，或者这条线根本不经过水，就老老实实走雪径：别为了「会游泳的怪」
+	# 算出一条横穿草坪的直线路径。
+	# **霜崽自己不碎冰**：冰面没被碎冰者凿开之前，上帝模式刷出来的霜崽也走大路
+	# （和正式波次用同一条规则，测试时看到的就是玩家看到的行为）。
+	var swim := Vector2i(-1, -1)
+	var can_swim := kind == Enemy.Kind.ICEBREAKER \
+		or (kind == Enemy.Kind.FROSTLING and GameState.ice_opened)
+	if can_swim and grid.has_water():
+		var route := grid.swim_route_home(c)
+		if not route.is_empty() and int(route.get("from", -1)) >= 0:
+			cells = route["cells"]
+			swim = Vector2i(int(route["from"]), int(route["to"]))
+	var path := grid.cells_to_world(cells)
+	var base_pos := grid.cell_to_world(c)
+	var n := clampi(count, 1, 12)
+	for i in n:
+		# 多只时在格子里摊成一小圈，否则它们会完全重叠、看起来只出了一只
+		var off := Vector3.ZERO
+		if n > 1:
+			var a := TAU * float(i) / float(n)
+			off = Vector3(cos(a), 0.0, sin(a)) * (GameGrid.CELL * 0.30)
+		var e := Enemy.new()
+		enemies_root.add_child(e)
+		e.spawn(kind, base_pos + off, path, Waves.hp_scale(GameState.wave) * hp_mult,
+			GameState.wave, swim)
+	Fx.flash(enemies_root, base_pos, Color(1.0, 0.55, 0.45), 0.55, 0.25)
+	Sound.play("place")
+	return n
+
+
 func _on_lives_changed(v: int) -> void:
 	if ui != null:
 		ui.refresh()
@@ -978,11 +1131,13 @@ func _update_info() -> void:
 			return
 		if build_kind >= 0:
 			var d: Dictionary = Tower.DATA[build_kind]
-			ui.set_info("建造 %s（%d 金）\n%s\n左键点击蓝色布防台放置（可连续放置），右键 / ESC 取消" % [d["name"], d["cost"], d["desc"]])
+			ui.set_info("建造 %s（%d 金）\n%s\n左键点击发光的布防台放置（可连续放置），右键 / ESC 取消" % [d["name"], d["cost"], d["desc"]])
 			return
 	# 预告只在波次变化时重算一次：Waves.preview() 会新建数组 + 洗牌 + 拼字符串，
 	# 放在每帧的 _update_info() 里会造成大量无谓分配
 	if _preview_wave != GameState.wave:
 		_preview_wave = GameState.wave
-		_preview_text = Waves.preview(GameState.wave + 1)
-	ui.set_info("守住左侧水晶！敌人从右侧两条土路分头压上，中途汇成一路。\n下一波：%s\n塔只能建在土路旁的蓝色布防台上（数量有限），路径格不可建塔" % _preview_text)
+		_preview_text = Waves.preview(GameState.wave + 1, _wave_opts())
+	# 地图说明来自 MapDefs，换地图不用改这里
+	var hint := str(grid.map_def.get("hint", "守住左侧水晶！敌人沿古道压上，中途汇成一路。"))
+	ui.set_info("%s\n下一波：%s" % [hint, _preview_text])

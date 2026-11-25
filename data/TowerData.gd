@@ -2,7 +2,7 @@ class_name TowerData
 ## 防御塔数值配置（外置数据文件）。调整造价/伤害/射程/描述只改这里。
 ## 注意：Kind 枚举顺序需与 Tower.gd 中的 enum 保持完全一致。
 
-enum Kind { ARROW, CANNON, FROST, SNIPER, TESLA, FLAME, BOUNCE }
+enum Kind { ARROW, CANNON, FROST, SNIPER, TESLA, FLAME, BOUNCE, POISON }
 
 const MAX_LEVEL := 3          # 最高等级：满级后可以「变异」（见 MUTATIONS）
 
@@ -35,6 +35,7 @@ const UNLOCK := {
 	Kind.TESLA: 5,
 	Kind.SNIPER: 6,
 	Kind.BOUNCE: 7,
+	Kind.POISON: 8,
 }
 
 ## 溅射伤害衰减：爆炸半径内「非直接命中目标」只吃该比例的伤害。
@@ -61,6 +62,14 @@ const SHOCK_BLAST_MULT := 1.4        # 爆炸伤害 = 这次喷火命中的伤�
 const MUD_RADIUS := 1.7              # 泥潭半径（世界单位，1 格 = 2.0）
 const MUD_TIME := 1.5                # 泥潭存在时间（秒），到点自行干涸
 const MUD_SLOW := 0.16               # 泥潭内的减速比例
+
+## 毒瓶塔：砸在地上留下的毒液池。
+## 半径不写死 —— 直接沿用这颗子弹的 splash（升级 / 变异 / 卡牌让它变大时会一起变大），
+## 最小给 POISON_POOL_MIN_R 兜底，免得单发溅射被削到 0 时毒池变成一个点。
+const POISON_POOL_MIN_R := 1.5
+const POISON_POOL_TIME := 4.2        # 毒池停留时间（秒）
+const POISON_REFRESH := 0.65         # 每次给圈内敌人续的中毒时长：走出毒池这么久后才停
+const POISON_TICK := 0.25            # 毒池扫描敌人的间隔
 
 ## 变异（Mutation）：塔升到满级（MAX_LEVEL）后，从 3 个方向里选一个，
 ## 永久决定这座塔的最终形态 —— 同一座塔只能变异一次，选完不能再改。
@@ -213,6 +222,26 @@ const MUTATIONS := {
 			"tint": Color(1.0, 0.85, 0.60),
 		},
 	],
+	Kind.POISON: [
+		{
+			"id": "poison_plague", "name": "瘟疫",
+			"desc": "毒伤 +60%\n毒池里的敌人掉血快得离谱，适合铺在必经的拐角",
+			"mods": {"dot_mul": 1.6},
+			"tint": Color(0.55, 1.0, 0.35),
+		},
+		{
+			"id": "poison_wide", "name": "腐蚀扩散",
+			"desc": "溅射范围 +1.2，射程 +10%\n毒池铺得更开，一条路全泡在毒里",
+			"mods": {"splash_add": 1.2, "range_mul": 1.1},
+			"tint": Color(0.75, 1.0, 0.45),
+		},
+		{
+			"id": "poison_rapid", "name": "连环投掷",
+			"desc": "攻速 +40%，单发伤害 -15%\n用频率把毒池连成一片",
+			"mods": {"rate_mul": 1.4, "dmg_mul": 0.85},
+			"tint": Color(0.42, 0.95, 0.55),
+		},
+	],
 }
 
 const KIND_TINT := {
@@ -223,6 +252,7 @@ const KIND_TINT := {
 	Kind.TESLA: Color(0.62, 0.52, 1.0),
 	Kind.FLAME: Color(1.0, 0.55, 0.30),
 	Kind.BOUNCE: Color(1.0, 0.95, 0.45),
+	Kind.POISON: Color(0.62, 0.95, 0.40),
 }
 
 ## 射程基线说明：布防台离路中心线 SLOT_GAP = 2 格（4.0 世界单位），路面半宽 1.6。
@@ -265,5 +295,13 @@ const DATA := {
 		"name": "弹射塔", "cost": 75, "dmg": 16.0, "rate": 1.0, "range": 6.2,
 		"splash": 0.0, "slow": 0.0, "chain": 2, "color": Color(1.0, 0.95, 0.45),
 		"bullet": 30.0, "desc": "子弹在敌人间弹射"
+	},
+	# 毒瓶塔：伤害不高，靠「砸出来的毒池」持续掉血。dot 就是毒池的每秒伤害
+	# （Splash 同时决定毒池半径）。毒伤无视护甲，打重甲 / 冰甲单位比直伤塔稳。
+	Kind.POISON: {
+		"name": "毒瓶塔", "cost": 95, "dmg": 12.0, "rate": 0.70, "range": 6.6,
+		"splash": 1.5, "slow": 0.0, "chain": 0, "dot": 15.0, "color": Color(0.62, 0.95, 0.40),
+		"bullet": 15.0,
+		"desc": "抛出毒瓶：落点砸伤并溅射，地上留下一滩毒液，站在里面的敌人持续中毒（无视护甲）"
 	},
 }

@@ -66,13 +66,33 @@ static func boss_name(wave: int) -> String:
 	return ""
 
 
-## 返回本波要生成的敌人种类列表（已打乱，首领排在最后）
-static func plan(wave: int) -> Array:
+## 返回本波要生成的敌人种类列表（已打乱，首领排在最后）。
+## opts 是**地图级**的开关（MapDefs 里同名标记），目前三个：
+##   "icebreaker"  本图有冰湖 → 混入会破冰游泳的「碎冰者」。它不沿雪径走，
+##                 数量不能多：每波最多 4 只，第 3 波起出现。
+##   "frostweaver" 本图有霜语者 → 混入会套冰甲的辅助单位。它是纯辅助，
+##                 比碎冰者更少：每波最多 3 只，第 4 波起出现。
+##   "frostling"   本图有霜崽（冰原小怪）→ 混入小杂兵，每波最多 8 只，第 2 波起出现。
+##                 它**自己砸不开冰面**，要等碎冰者把湖凿开以后才走水下段。
+static func plan(wave: int, opts: Dictionary = {}) -> Array:
 	var list: Array = []
 	var n := wave
+	var icebreak := bool(opts.get("icebreaker", false))
+	var weaver := bool(opts.get("frostweaver", false))
+	var frostling := bool(opts.get("frostling", false))
 
 	for i in range(6 + n * 2):
 		list.append(Enemy.Kind.GRUNT)
+	if icebreak and n >= 3:
+		for i in range(clampi(n - 3, 1, 4)):
+			list.append(Enemy.Kind.ICEBREAKER)
+	if weaver and n >= 4:
+		for i in range(clampi(n - 4, 1, 3)):
+			list.append(Enemy.Kind.FROSTWEAVER)
+	if frostling and n >= 2:
+		# 体型小、跑得快，靠数量压人：上限 8 只，别把一波塞成「霜崽海」
+		for i in range(clampi(n - 1, 2, 8)):
+			list.append(Enemy.Kind.FROSTLING)
 	if n >= 3:
 		for i in range(n * 2):
 			list.append(Enemy.Kind.RUNNER)
@@ -111,8 +131,8 @@ static func plan(wave: int) -> Array:
 
 
 ## 波次预览文字
-static func preview(wave: int) -> String:
-	var p := plan(wave)
+static func preview(wave: int, opts: Dictionary = {}) -> String:
+	var p := plan(wave, opts)
 	var counts := {}
 	for k in p:
 		counts[k] = int(counts.get(k, 0)) + 1

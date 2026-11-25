@@ -18,6 +18,14 @@ var _hit_targets: Array = []
 var _last_pos := Vector3.ZERO
 var _mat: StandardMaterial3D
 
+## 毒瓶的抛物线：飞行高度 = 起点到落点的直线插值 + 一个正弦拱起。
+## 只改视觉高度，命中判定仍然是「贴到目标 / 飞完全程」，不会因为弧度打偏。
+const LOB_HEIGHT := 1.6
+var _lob := false
+var _lob_travelled := 0.0
+var _lob_total := 1.0
+var _lob_start_y := 0.0
+
 ## 「处决协议」卡的触发阈值：目标生命低于这个比例时吃额外伤害
 const EXECUTE_HP_RATIO := 0.35
 
@@ -37,6 +45,11 @@ func configure(t, dmg: float, spl: float, slw: float, st: float, crit: bool, sp:
 	src_mutation = mut
 	if is_instance_valid(t):
 		_last_pos = t.global_position + Vector3(0.0, 0.7, 0.0)
+	# 毒瓶走抛物线：把起点高度和总距离记下来，_process 里按进度补一个拱
+	_lob = src_kind == TowerData.Kind.POISON
+	if _lob:
+		_lob_start_y = global_position.y
+		_lob_total = maxf(global_position.distance_to(_last_pos), 0.5)
 	_build()
 
 
@@ -45,6 +58,8 @@ const STONE_SIZE := 0.62
 
 
 func _build() -> void:
+	if _build_flask():
+		return
 	if _build_stone():
 		return
 	var r := 0.22 if is_crit else 0.16
@@ -80,6 +95,71 @@ func _build() -> void:
 	trail.material_override = tmat
 	trail.position = Vector3(0.0, 0.0, 0.35)
 	add_child(trail)
+
+
+## 毒瓶塔的弹丸：一只小绿瓶（鼓肚子 + 瓶颈 + 软木塞 + 亮芯）。
+## 和炮塔一样用程序化几何而不是贴图 —— 工程里没有「毒瓶」素材，
+## 但绿色玻璃瓶的剪影在俯视角下已经足够认出来，别去等美术。
+func _build_flask() -> bool:
+	if src_kind != TowerData.Kind.POISON:
+		return false
+	var size := 1.25 if is_crit else 1.0
+	var glass := StandardMaterial3D.new()
+	glass.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	glass.albedo_color = Color(0.30, 0.92, 0.24)
+	glass.emission_enabled = true
+	glass.emission = Color(0.35, 1.0, 0.28)
+	glass.emission_energy_multiplier = 0.85
+
+	var body := MeshInstance3D.new()
+	var bm := SphereMesh.new()
+	bm.radius = 0.135 * size
+	bm.height = 0.20 * size
+	bm.radial_segments = 9
+	bm.rings = 5
+	body.mesh = bm
+	body.material_override = glass
+	add_child(body)
+
+	var neck := MeshInstance3D.new()
+	var nm := CylinderMesh.new()
+	nm.top_radius = 0.035 * size
+	nm.bottom_radius = 0.05 * size
+	nm.height = 0.10 * size
+	nm.radial_segments = 7
+	neck.mesh = nm
+	neck.material_override = glass
+	neck.position.y = 0.12 * size
+	add_child(neck)
+
+	var cork := MeshInstance3D.new()
+	var km := CylinderMesh.new()
+	km.top_radius = 0.042 * size
+	km.bottom_radius = 0.042 * size
+	km.height = 0.035 * size
+	km.radial_segments = 6
+	cork.mesh = km
+	var kmat := StandardMaterial3D.new()
+	kmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	kmat.albedo_color = Color(0.72, 0.55, 0.34)
+	cork.material_override = kmat
+	cork.position.y = 0.185 * size
+	add_child(cork)
+
+	# 拖尾换成一条淡绿色的光带，抛出去的时候能看见轨迹
+	var trail := MeshInstance3D.new()
+	var tm := SphereMesh.new()
+	tm.radius = 0.10 * size
+	tm.height = 0.14 * size
+	trail.mesh = tm
+	var tmat := StandardMaterial3D.new()
+	tmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	tmat.albedo_color = Color(0.45, 1.0, 0.30, 0.30)
+	tmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	trail.material_override = tmat
+	trail.position = Vector3(0.0, 0.02, -0.22)
+	add_child(trail)
+	return true
 
 
 ## 炮塔专用的石弹：res://textures/bullet_stone.png。
@@ -134,6 +214,11 @@ func _process(delta: float) -> void:
 		return
 
 	global_position += dir.normalized() * step
+	# 毒瓶：在直线上叠一个正弦拱起（t=1 时正好落回目标高度，不会悬空炸）
+	if _lob:
+		_lob_travelled += step
+		var t := clampf(_lob_travelled / _lob_total, 0.0, 1.0)
+		global_position.y = lerpf(_lob_start_y, dest.y, t) + sin(t * PI) * LOB_HEIGHT
 	look_at(global_position + dir, Vector3.UP)
 
 
@@ -184,7 +269,9 @@ func _deal(e, dmg_coef: float = 1.0) -> void:
 		dmg *= 1.0 + exec_bonus
 	# 喷火塔射速 3/s，每发都飘字会把屏幕糊满：只有暴击才显示数字
 	var show_num := is_crit or src_kind != TowerData.Kind.FLAME
-	e.take_damage(dmg, is_crit, show_num)
+	# 火属性标记：霜语者的冰甲会被火烧得特别快（见 Enemy.take_damage）
+	var element := "fire" if src_kind == TowerData.Kind.FLAME else ""
+	e.take_damage(dmg, is_crit, show_num, element)
 	_apply_effects(e)
 	# 火电联动：喷火塔命中「被闪电塔感电」的目标 → 引爆一次小范围爆炸
 	if src_kind == TowerData.Kind.FLAME and e.has_method("consume_shock") and e.consume_shock():
@@ -226,7 +313,8 @@ func _shock_blast(center) -> void:
 		if other == null or not is_instance_valid(other) or other == center:
 			continue
 		if other.global_position.distance_to(cpos) <= radius:
-			other.take_damage(blast_dmg, false, false)
+			# 火电联动的爆炸同样是火：对冰甲一样是双倍以上削甲
+			other.take_damage(blast_dmg, false, false, "fire")
 	var parent := get_parent()
 	if parent != null:
 		# 复用炮塔那套爆炸素材，尺寸跟着爆炸半径走，暴击再大一号
@@ -292,6 +380,11 @@ func _spawn_flash(pos: Vector3) -> void:
 	# 二级及以上换成更炸的「碎石 + 浓烟」版（fx_explosion_l2.png），没放图就沿用一级那张。
 	# 变异「攻城巨炮」再换成 9 帧序列（fx_siege_0…8：落石 → 聚拢 → 爆燃）。
 	# 尺寸跟着溅射半径走，暴击再大一号；都没图就退回去用纯色光球。
+	# 毒瓶：落地砸出一滩毒液（这一下才是毒瓶塔的主要伤害来源）
+	if src_kind == TowerData.Kind.POISON:
+		_spawn_poison(pos)
+		return
+
 	if src_kind == TowerData.Kind.CANNON:
 		var sz: float = 2.0 + splash * 0.55 + (0.6 if is_crit else 0.0)
 		# 变异「震地雷」：落地炸出一个泥潭，踩进去的敌人才会减速
@@ -330,6 +423,23 @@ func _spawn_flash(pos: Vector3) -> void:
 ## 高度不能用「命中点 - 0.7」反推：敌人恒在 SURFACE_Y 上走，而路面本身抬了 0.06
 ## （桥上还要再拱 0.08），压在 0.85 的泥潭会被路面整个埋掉 —— 看起来就像「有时候没生成」。
 ## 统一抬到 SURFACE_Y 之上一点点，和路面流动箭头（FLOW_Y）同一量级。
+## 毒瓶落地：在原地铺一滩毒液。
+## 高度同样不能从命中点反推（敌人恒在 SURFACE_Y 上，路面还抬了 0.06），
+## 和泥潭一样统一压在 SURFACE_Y + 0.16，否则毒池会被路面埋掉，看起来像「有时候没生成」。
+func _spawn_poison(pos: Vector3) -> void:
+	var parent := get_parent()
+	if parent == null:
+		return
+	var at := Vector3(pos.x, GameGrid.SURFACE_Y + 0.16, pos.z)
+	var pool := PoisonPool.new()
+	pool.name = "PoisonPool"
+	parent.add_child(pool)
+	# 毒池半径直接跟这发子弹的溅射走：升级 / 变异 / 卡牌让它变大时会一起变大
+	pool.setup(at, maxf(splash, float(TowerData.POISON_POOL_MIN_R)), dot)
+	Fx.flash(parent, pos, Color(0.55, 1.0, 0.32), 0.65, 0.20)
+	Fx.ring(parent, at, Color(0.42, 0.98, 0.28), maxf(splash, 1.4), 0.34)
+
+
 func _spawn_mud(pos: Vector3) -> void:
 	var parent := get_parent()
 	if parent == null:

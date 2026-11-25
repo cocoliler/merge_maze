@@ -36,6 +36,8 @@ const SLOTS := [
 	"fx_frost_fog",
 	"enemy_grunt", "enemy_runner", "enemy_tank", "enemy_boss",
 	"enemy_flyer", "enemy_shield",
+	# 霜崽：原画精灵（billboard 方片，带透明通道），见 Enemy._build_sprite_body()
+	"enemy_frostling",
 ]
 
 static var _index := {}        # 小写槽位名 -> 完整路径
