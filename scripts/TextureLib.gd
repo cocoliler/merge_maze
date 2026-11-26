@@ -23,6 +23,7 @@ const SLOTS := [
 	"spawn_pad",    # 出生踏板
 	"bullet",       # 子弹（所有塔共用的球体贴图）
 	"bullet_stone", # 炮塔专用的石块弹丸（billboard 方片，带透明通道）
+	"bullet_arrow", # 箭塔专用的箭矢（方片，箭头朝前、始终正对镜头）
 	"fx_explosion", # 炮塔命中的爆炸（billboard 方片，带透明通道）
 	"fx_explosion_l2", # 二级及以上炮塔命中的爆炸（碎石 + 浓烟版）
 	# 变异「攻城巨炮」命中爆炸的序列帧：落石 → 聚拢 → 爆燃，按 _0 → _8 顺序播放
@@ -32,6 +33,18 @@ const SLOTS := [
 	"fx_mud_0", "fx_mud_1", "fx_mud_2", "fx_mud_3", "fx_mud_4", "fx_mud_5", "fx_mud_6",
 	# 冰塔冰冻射线命中的碎冰序列帧（冰块炸开，0.3 秒内按 _0 → _1 播完）
 	"fx_ice_0", "fx_ice_1",
+	# 变异「碎冰」击杀敌人时的冰爆序列帧（在尸体位置炸开，按 _0 → _5 播完）
+	"fx_iceburst_0", "fx_iceburst_1", "fx_iceburst_2",
+	"fx_iceburst_3", "fx_iceburst_4", "fx_iceburst_5",
+	# 喷火塔的火焰喷流序列帧（喷嘴在左边缘、火焰向右铺开，20fps 循环播放 _0 → _10）
+	"fx_flame_jet_0", "fx_flame_jet_1", "fx_flame_jet_2", "fx_flame_jet_3",
+	"fx_flame_jet_4", "fx_flame_jet_5", "fx_flame_jet_6", "fx_flame_jet_7",
+	"fx_flame_jet_8", "fx_flame_jet_9", "fx_flame_jet_10",
+	# 喷火塔在地面上留下的「火烧地」序列帧（方形画布、火焰贴四周，沿火柱方向平铺）
+	"fx_flame_field_0", "fx_flame_field_1", "fx_flame_field_2", "fx_flame_field_3",
+	"fx_flame_field_4", "fx_flame_field_5", "fx_flame_field_6",
+	# 霜环冰雾的拖尾：敌人踩过留下的霜迹，两帧随机取一张（同一画布尺寸）
+	"fx_frost_trail_0", "fx_frost_trail_1",
 	# 变异「霜环」铺在地面上的冰雾（圆形平铺，方形画布、雾团居中、四周透明）
 	"fx_frost_fog",
 	"enemy_grunt", "enemy_runner", "enemy_tank", "enemy_boss",

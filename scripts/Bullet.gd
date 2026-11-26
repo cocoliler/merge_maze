@@ -51,13 +51,29 @@ func configure(t, dmg: float, spl: float, slw: float, st: float, crit: bool, sp:
 		_lob_start_y = global_position.y
 		_lob_total = maxf(global_position.distance_to(_last_pos), 0.5)
 	_build()
+	# 箭在第一帧 _process 之前就会渲染，先按初始方向摆好，免得刚出膛时横着
+	if _arrow_mi != null:
+		_orient_arrow(_last_pos - global_position)
 
 
 ## 炮塔弹丸的宽度（世界单位）。石块比原来的光球大一圈，才像「一坨石头砸过去」。
 const STONE_SIZE := 0.62
 
+## 箭矢的长度（世界单位）。格子是 2 单位，箭约半格长，飞过路面时大小正好。
+const ARROW_LEN := 1.15
+
+## 箭矢的方片节点。箭塔的子弹不是球，而是「一张始终正对镜头的箭」，见 _orient_arrow()。
+var _arrow_mi: MeshInstance3D = null
+
+## 箭矢飞行拖尾的发射间隔（秒）。每段之间留一点空隙，连起来才像一条跟着箭走的亮线，
+## 又不会变成一根实心光柱。0.045 秒 ≈ 每飞 1.2 单位补一段。
+const ARROW_TRAIL_STEP := 0.045
+var _trail_t: float = 0.0
+
 
 func _build() -> void:
+	if _build_arrow():
+		return
 	if _build_flask():
 		return
 	if _build_stone():
@@ -95,6 +111,65 @@ func _build() -> void:
 	trail.material_override = tmat
 	trail.position = Vector3(0.0, 0.0, 0.35)
 	add_child(trail)
+
+
+## 箭塔专用的箭矢：res://textures/bullet_arrow.png（原画：箭头朝左、箭羽朝右）。
+## 和石弹一样用方片而不是球体 —— 原画是「已经打好光的成品精灵」，贴到球面上会被二次打光、
+## 边缘还会糊。区别是石弹可以用 billboard（圆石头转不转看不出来），
+## 箭必须让箭头指向前进方向，所以朝向由 _orient_arrow() 每帧手动算。
+## 没放图时返回 false，自动回退到原来的发光球。
+func _build_arrow() -> bool:
+	if src_kind != TowerData.Kind.ARROW:
+		return false
+	var tex := TextureLib.get_texture("bullet_arrow")
+	if tex == null:
+		return false
+	var aspect := float(tex.get_height()) / maxf(float(tex.get_width()), 1.0)
+	var w: float = ARROW_LEN * (1.2 if is_crit else 1.0)
+	var quad := QuadMesh.new()
+	quad.size = Vector2(w, w * aspect)
+
+	var mi := MeshInstance3D.new()
+	mi.mesh = quad
+	_mat = StandardMaterial3D.new()
+	_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	# 精灵带透明边缘：alpha 混合才能保留原画那圈柔边（scissor 会切成硬边）
+	_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_mat.albedo_texture = tex
+	_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# 一点点自发光：箭杆原画偏暗，压在深色路面上会糊成一团
+	_mat.emission_enabled = true
+	_mat.emission = Color(1.0, 0.90, 0.72)
+	# 自发光抬高：箭本身是「攻击」的主体，压在明亮草地上要能一眼看见
+	_mat.emission_energy_multiplier = 0.35
+	mi.material_override = _mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mi)
+	_arrow_mi = mi
+	return true
+
+
+## 箭矢的朝向：正对镜头画成一张卡片，同时让贴图左边（箭头）指向前进方向。
+## 不能直接用 billboard 模式 —— 它在顶点着色器里会把旋转整个换成相机基，箭头就永远朝屏幕右边。
+## 所以自己拼 basis：Z 轴朝相机（卡片正对镜头），-X 轴对齐飞行方向（原画箭头朝左）。
+func _orient_arrow(dir: Vector3) -> void:
+	if _arrow_mi == null or not is_instance_valid(_arrow_mi):
+		return
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var z := cam.global_position - global_position
+	if z.length_squared() < 0.0001:
+		return
+	z = z.normalized()
+	# 飞行方向投影到「垂直于视线」的平面上：这样箭头在屏幕上正好指向它飞去的方向
+	var flat := dir - z * dir.dot(z)
+	if flat.length_squared() < 0.0001:
+		return
+	flat = flat.normalized()
+	var x := -flat
+	var y := z.cross(x)
+	_arrow_mi.global_basis = Basis(x, y, z)
 
 
 ## 毒瓶塔的弹丸：一只小绿瓶（鼓肚子 + 瓶颈 + 软木塞 + 亮芯）。
@@ -214,12 +289,37 @@ func _process(delta: float) -> void:
 		return
 
 	global_position += dir.normalized() * step
-	# 毒瓶：在直线上叠一个正弦拱起（t=1 时正好落回目标高度，不会悬空炸）
-	if _lob:
-		_lob_travelled += step
-		var t := clampf(_lob_travelled / _lob_total, 0.0, 1.0)
-		global_position.y = lerpf(_lob_start_y, dest.y, t) + sin(t * PI) * LOB_HEIGHT
-	look_at(global_position + dir, Vector3.UP)
+	# 箭要「箭头朝前 + 卡片正对镜头」，由 _orient_arrow 自己搭 basis；
+	# 球体、石弹和毒瓶（billboard / look_at）沿用各自的老做法。
+	if _arrow_mi != null:
+		_orient_arrow(dir)
+		_arrow_trail(delta, dir)
+	else:
+		# 毒瓶：在直线上叠一个正弦拱起（t=1 时正好落回目标高度，不会悬空炸）
+		if _lob:
+			_lob_travelled += step
+			var t := clampf(_lob_travelled / _lob_total, 0.0, 1.0)
+			global_position.y = lerpf(_lob_start_y, dest.y, t) + sin(t * PI) * LOB_HEIGHT
+		look_at(global_position + dir, Vector3.UP)
+
+
+## 箭矢的飞行拖尾：每隔 ARROW_TRAIL_STEP 秒在身后补一小段曳光，连起来就是一条跟着箭走的亮线。
+## 「箭塔在开火」这件事最直观的证据其实是这条拖尾 —— 枪口闪光只有一瞬，箭飞过去需要 0.3 秒左右。
+## 段数 = 飞行时间 / STEP（射程内约 6 段），每段 0.2 秒淡出，常驻量个位数，开销可以忽略。
+func _arrow_trail(delta: float, dir: Vector3) -> void:
+	_trail_t += delta
+	if _trail_t < ARROW_TRAIL_STEP:
+		return
+	var span := speed * _trail_t
+	_trail_t = 0.0
+	var parent := get_parent()
+	if parent == null:
+		return
+	var d := dir.normalized()
+	var to := global_position
+	var from := to - d * span
+	# alpha 压到 0.45：拖尾是「余晖」，不能比箭本身还亮
+	Fx.tracer(parent, from, to, _arrow_fx_color(), 0.075, 0.20, 0.16, 0.45)
 
 
 func _hit(pos: Vector3) -> void:
@@ -302,26 +402,34 @@ func _synergy_fx(e) -> void:
 ## 火电联动爆炸：以被引爆的敌人为中心，对周围敌人造成一次小范围伤害。
 ## 这里直接调 take_damage（而不是再造一发子弹），所以不会无限连锁引爆。
 func _shock_blast(center) -> void:
+	shock_blast(get_parent(), center, damage, is_crit)
+
+
+## 超载反应（火电联动）的爆炸：感电敌人被喷火命中时在它身上炸一下。
+## dmg 是**不含暴击**的单发伤害 —— 暴击倍率在这里乘，和子弹路径口径一致。
+## 做成静态是因为喷火塔现在是持续火柱（Tower._deal_flame），不再产生 Bullet，
+## 但爆炸规则必须和子弹命中完全一样，不能有第二份实现。
+static func shock_blast(parent: Node, center, dmg: float, crit: bool) -> void:
 	if center == null or not is_instance_valid(center):
 		return
 	var cpos: Vector3 = center.global_position
 	var radius := float(TowerData.SHOCK_BLAST_RADIUS)
 	# 超载反应：基础 1.4 倍 + 强化卡「过载增幅 / 元素共鸣」的额外倍率
 	var blast_mult := float(TowerData.SHOCK_BLAST_MULT) + float(GameState.buffs.get("overload_dmg", 0.0))
-	var blast_dmg := damage * (2.0 if is_crit else 1.0) * blast_mult
-	for other in get_tree().get_nodes_in_group("enemies"):
+	var blast_dmg := dmg * (2.0 if crit else 1.0) * blast_mult
+	for other in center.get_tree().get_nodes_in_group("enemies"):
 		if other == null or not is_instance_valid(other) or other == center:
 			continue
 		if other.global_position.distance_to(cpos) <= radius:
 			# 火电联动的爆炸同样是火：对冰甲一样是双倍以上削甲
 			other.take_damage(blast_dmg, false, false, "fire")
-	var parent := get_parent()
-	if parent != null:
-		# 复用炮塔那套爆炸素材，尺寸跟着爆炸半径走，暴击再大一号
-		var sz: float = radius * 1.6 + (0.5 if is_crit else 0.0)
-		Fx.burst(parent, cpos + Vector3(0.0, 0.5, 0.0), "fx_explosion", sz, 0.42)
-		Fx.flash(parent, cpos + Vector3(0.0, 0.6, 0.0), Color(1.0, 0.55, 0.18), radius * 0.7, 0.22)
-		Fx.ring(parent, cpos + Vector3(0.0, 0.3, 0.0), Color(1.0, 0.42, 0.12), radius, 0.34)
+	if parent == null:
+		return
+	# 复用炮塔那套爆炸素材，尺寸跟着爆炸半径走，暴击再大一号
+	var sz: float = radius * 1.6 + (0.5 if crit else 0.0)
+	Fx.burst(parent, cpos + Vector3(0.0, 0.5, 0.0), "fx_explosion", sz, 0.42)
+	Fx.flash(parent, cpos + Vector3(0.0, 0.6, 0.0), Color(1.0, 0.55, 0.18), radius * 0.7, 0.22)
+	Fx.ring(parent, cpos + Vector3(0.0, 0.3, 0.0), Color(1.0, 0.42, 0.12), radius, 0.34)
 	Sound.play("explosion")
 
 
@@ -376,6 +484,10 @@ func _nearest_enemy_except(from: Node3D, radius: float):
 
 
 func _spawn_flash(pos: Vector3) -> void:
+	# 箭塔命中：一小簇白色火星 + 一圈细冲击环，见 _spawn_arrow_hit()
+	if src_kind == TowerData.Kind.ARROW:
+		_spawn_arrow_hit(pos)
+		return
 	# 炮塔命中：放素材里的那团「烟 + 火花」（res://textures/fx_explosion.png）。
 	# 二级及以上换成更炸的「碎石 + 浓烟」版（fx_explosion_l2.png），没放图就沿用一级那张。
 	# 变异「攻城巨炮」再换成 9 帧序列（fx_siege_0…8：落石 → 聚拢 → 爆燃）。
@@ -438,6 +550,38 @@ func _spawn_poison(pos: Vector3) -> void:
 	pool.setup(at, maxf(splash, float(TowerData.POISON_POOL_MIN_R)), dot)
 	Fx.flash(parent, pos, Color(0.55, 1.0, 0.32), 0.65, 0.20)
 	Fx.ring(parent, at, Color(0.42, 0.98, 0.28), maxf(splash, 1.4), 0.34)
+
+
+## 箭矢命中：箭尖扎进去的那一下 —— 一团闪光 + 一簇火星四散。
+##
+## 为什么不用炮塔那套爆炸贴图：箭塔没有溅射，一朵烟会让人误以为有范围伤害。
+## 也**不画冲击环**：环是「范围提示」，箭塔恰恰没有范围 —— 只留闪光 + 四散的火星。
+## 火星用**四散**（spread = π，整球随机）而不是朝某一边喷：命中点是对着敌人身体的，
+## 来箭方向在这一帧已经不可靠了，四散反而更像「扎进去溅出来的碎屑」。
+## 箭塔射速 1.45/s，这个特效常驻量很小，但暴击那发会明显更亮更大。
+func _spawn_arrow_hit(pos: Vector3) -> void:
+	var parent := get_parent()
+	if parent == null:
+		return
+	var boost := 1.6 if is_crit else 1.0
+	var col := _arrow_fx_color()
+	# 闪光只是「亮一下」的底子，真正说明「扎进去了」的是四散的火星，所以火星要够大
+	Fx.flash(parent, pos, col.lerp(Color.WHITE, 0.55), 0.20 * boost, 0.11)
+	Fx.sparks(parent, pos, Vector3.UP, col.lerp(Color.WHITE, 0.7),
+			int(7 * boost), PI, 3.8, 0.16, 0.22)
+
+
+## 箭塔特效的主色：默认暖白；变异箭（疾风 / 裂空 / 穿云）各自带一点自己的色调，
+## 这样「拖尾颜色」和塔身光环、箭轨颜色是一致的，玩家能看出是哪一种箭。
+func _arrow_fx_color() -> Color:
+	match src_mutation:
+		"arrow_gale":
+			return Color(0.70, 1.0, 0.84)
+		"arrow_pierce":
+			return Color(0.94, 1.0, 0.68)
+		"arrow_split":
+			return Color(0.66, 0.96, 1.0)
+	return Color(1.0, 0.94, 0.76)
 
 
 func _spawn_mud(pos: Vector3) -> void:

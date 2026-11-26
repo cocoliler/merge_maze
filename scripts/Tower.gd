@@ -28,21 +28,28 @@ const TOWER_HEIGHT := [4.0, 4.4, 4.8]
 
 ## 炮口高度占塔高的比例（不同塔的"出弹点"位置不一样，子弹才不会从塔肚子里飞出来）
 const MUZZLE_RATIO := {
-	Kind.ARROW: 0.88,
+	# 箭塔的弩臂藏在干草尖顶里面，出弹点必须抬到接近顶点，
+	# 否则箭和枪口特效都是从锥形屋顶内部冒出来的，一半被屋顶挡掉
+	Kind.ARROW: 0.97,
 	Kind.CANNON: 0.72,
 	Kind.FROST: 0.90,
 	Kind.SNIPER: 0.84,
 	Kind.TESLA: 0.92,
-	Kind.FLAME: 0.78,
+	Kind.FLAME: 0.90,
 	Kind.BOUNCE: 0.86,
 	# 毒瓶塔的出手点是坩埚口（比塔身矮一截），瓶子从这里抛出去才对得上
 	Kind.POISON: 0.62,
 }
 
+## 火龙探在塔顶前方多远（占塔高比例）：火柱得从龙嘴出来，
+## 否则会从塔轴线上、也就是龙的脖子后面冒出来，看着像火从肚子里漏的。
+const FLAME_MOUTH_RATIO := 0.19
+
 ## 顶部武器会跟着目标走的塔：模型里带独立 Turret 节点，塔身不动、只有炮管/弩臂/发射槽转。
-## 箭塔（靶心木屋）、冰塔（冰晶）、电塔（电球）、火塔（火盆）都是全向的，不需要转向。
+## 箭塔（靶心木屋）、冰塔（冰晶）、电塔（电球）是全向的，不需要转向；
+## 火塔的塔顶是一整只火龙，必须转身才能对着敌人喷火，所以也算瞄准塔。
 ## 毒瓶塔的 Turret 是「炼金师举着瓶子的那条手臂」，转起来像在瞄着往哪扔。
-const AIMING := [Kind.CANNON, Kind.SNIPER, Kind.BOUNCE, Kind.POISON]
+const AIMING := [Kind.CANNON, Kind.SNIPER, Kind.BOUNCE, Kind.FLAME, Kind.POISON]
 
 ## 转向速度：越大越快；14 大约 0.25 秒转 90°，看起来有份量又不拖沓
 const AIM_TURN := 14.0
@@ -50,8 +57,35 @@ const AIM_TURN := 14.0
 ## 重新挑目标的间隔（秒）：没必要每帧扫一遍全场敌人
 const AIM_REFRESH := 0.12
 
+## 喷火塔的喷射周期：固定 2.5 秒一轮（喷 1.5 秒 + 停 1.0 秒），**不受攻速影响**。
+## 攻速只决定「喷的过程中每秒结算几段伤害」，所以这里绝不能再乘 fire_rate / GameState.buffs["rate"]。
+const FLAME_SPRAY_TIME := 1.5
+const FLAME_CYCLE := 2.5
+
+## 段伤害**不写死**，由「每轮喷多久 + 攻速」反推（见 flame_ticks / flame_seg_damage）：
+##   每轮段数 n = round(1.5 × 攻速)，段伤害 = 面板伤害 × 攻速 × 2.5 / n
+## 于是平均 DPS = n × 段伤害 / 2.5 = 面板伤害 × 攻速，和改造前「每 1/攻速 秒打一发」完全相等，
+## 而且攻速取任何值都成立（四舍五入带来的差量被段伤害吸收，不会因为取整而偷偷削弱/加强）。
+## 火柱半径（世界单位）：1 格 = 2.0，0.7 大约 1/3 格宽；判定只算水平面。
+const FLAME_RADIUS := 0.7
+
+## 火焰最短长度（世界单位）：目标贴脸时火柱也不至于缩成一小团
+const FLAME_MIN_LEN := 3.0
+
+## 变异「火墙」把火柱加宽到的倍数（原来的 +1.6 溅射改成「一条更宽的火柱」）
+const FLAME_WALL_WIDE := 2.2
+
+## 火烧地（纯视觉）：从塔脚外 0.9 开始点着，别把火铺到塔底下；横向比火柱再宽一圈
+const FLAME_FIELD_START := 0.9
+const FLAME_FIELD_WIDE := 3.0
+
 const DATA := TowerData.DATA
 const UNLOCK := TowerData.UNLOCK
+
+## 火柱脚本用 preload 取，而不是依赖 class_name —— 新建脚本的全局类要等编辑器扫盘才登记，
+## 这里显式 preload 就永远不会出现「工程一跑就 Identifier 'FlameJet' not declared」。
+const FlameJetScript := preload("res://scripts/FlameJet.gd")
+const FlameFieldScript := preload("res://scripts/FlameField.gd")
 
 
 ## 该塔从第几波开始可以建造
@@ -131,6 +165,24 @@ var _beam_tick: float = 0.0      # 距离下一次「打出一发」还差多久
 ## 光环塔（变异「霜环」）：完全不打伤害，只在射程内铺一层冰雾并持续减速
 var _fog: FrostFog
 var _fog_tick: float = 0.0
+## 冰雾拖尾：射程内的地面敌人每 AURA_TICK 秒在脚下留一摊霜迹（纯视觉，不参与减速）
+var _frost_trail_tick: float = 0.0
+
+## 喷火塔（持续火柱）：三个时钟互不影响
+##   _fj_gap  —— 距离下一轮开喷还有多久（固定 2.5 秒周期里剩下的部分）
+##   _fj_left —— 本轮还剩多少秒火（固定 1.5 秒）
+##   _fj_tick —— 距离下一段伤害结算还有多久（由攻速决定）
+var _fj: FlameJetScript               # 贴图缺失时为 null，自动回退成旧的「火球」逻辑
+var _fj_left: float = 0.0             # 本轮还剩多少秒火
+var _fj_gap: float = 0.0              # 距离下一轮喷火还有多少秒
+var _fj_tick: float = 0.0             # 距离下一段伤害还有多少秒
+var _fj_dir := Vector3.FORWARD        # 锁死的三维方向（火柱外观用）
+var _fj_hdir := Vector3.FORWARD       # 水平方向（命中判定用）
+var _fj_len: float = 0.0              # 锁死的火柱长度
+
+## 龙嘴朝前探出的距离（世界单位，按塔高算）：目标在身后时火柱会明显缩短，
+## 记下来给 _muzzle_pos() 用，免得每帧再算一次转身
+var _flame_mouth_fwd: float = 0.0
 
 # ---------------------------------------------------------------- 生命周期
 
@@ -156,9 +208,12 @@ func cell_to_world(c: Vector2i) -> Vector3:
 
 func _process(delta: float) -> void:
 	if not GameState.running:
-		# 暂停 / 波间休整：射线必须立刻断掉，否则会留一条挂在敌人身上的死线
+		# 暂停 / 波间休整：射线必须立刻断掉，否则会留一条挂在敌人身上的死线；
+		# 火柱同理，不然暂停时火会一直烧在半空中
 		if _beam != null and is_instance_valid(_beam):
 			_beam.stop()
+		if _fj != null and is_instance_valid(_fj):
+			_fj.stop()
 		return
 
 	if suppress_timer > 0.0:
@@ -197,6 +252,11 @@ func _process(delta: float) -> void:
 		_update_beam(delta)
 		return
 
+	# 持续喷火型（喷火塔）：固定周期 + 锁死方向的火柱，同样不打子弹
+	if is_flame():
+		_update_flame_spray(delta)
+		return
+
 	cooldown -= delta
 	if cooldown > 0.0:
 		return
@@ -209,6 +269,254 @@ func _process(delta: float) -> void:
 	cooldown = 1.0 / maxf(fire_rate, 0.05)
 	_shoot(target)
 
+
+# ---------------------------------------------------------------- 持续火柱（喷火塔）
+
+## 喷火塔的规则：**固定 2.5 秒一轮**（喷 1.5 秒 + 停 1.0 秒），周期不受攻速影响；
+## 方向在点火瞬间按目标锁死，整轮不再追人；1.5 秒里的伤害按攻速分成 n 段，
+## 段伤害由「面板伤害 × 攻速 × 2.5 / n」反推，平均 DPS 与「每 1/攻速 秒打一发」完全相等。
+##
+## 这套东西和冰塔的持续射线是同一类改造：外观连续，但伤害节奏仍然走攻速 ——
+## 所以数值一行都没动，TowerData 里只改了描述文案。
+func is_flame() -> bool:
+	return kind == Kind.FLAME and _fj != null
+
+
+## 火柱半径：变异「火墙」把它拉宽到 2.2 倍（判定、火柱、火烧地三者共用一个倍率）
+func flame_radius() -> float:
+	var wide := FLAME_WALL_WIDE if mutation == "flame_wall" else 1.0
+	return FLAME_RADIUS * wide
+
+
+## 喷火塔的**有效攻速**：雪人王的雪球会把 atk_slow 打折（和子弹塔共用同一个 debuff），
+## 减速期间段数变少、段伤变大，但平均 DPS 依然等于「伤害 × 有效攻速」。
+func flame_rate() -> float:
+	return fire_rate * (1.0 - atk_slow)
+
+
+## 本轮要结算几段伤害：n = round(喷 1.5 秒 × 有效攻速)，至少 1 段
+func flame_ticks() -> int:
+	return maxi(1, int(round(FLAME_SPRAY_TIME * flame_rate())))
+
+
+## 两段伤害之间的间隔：把 1.5 秒均分给 n 段
+func flame_tick_interval() -> float:
+	return FLAME_SPRAY_TIME / float(flame_ticks())
+
+
+## 单段伤害：面板伤害 × 有效攻速 × 2.5 / n
+## 于是 n 段打完的平均 DPS = 面板伤害 × 有效攻速，和旧的「每发满额伤害」严格相等，
+## 取整（round）带来的差量被段伤害吸收，攻速取任何值都不会偷偷变强 / 变弱。
+func flame_seg_damage() -> float:
+	return damage * flame_rate() * FLAME_CYCLE / float(flame_ticks())
+
+
+## 枪口位置：龙嘴在塔顶前方一段距离（模型没换成龙时为 0，退回塔轴线）
+func _muzzle_pos() -> Vector3:
+	var p := global_position + Vector3(0.0, muzzle_y, 0.0)
+	if _flame_mouth_fwd > 0.0 and _fj != null:
+		p += Vector3(sin(_turret_yaw), 0.0, cos(_turret_yaw)) * _flame_mouth_fwd
+	return p
+
+
+## 喷火塔的每帧更新：喷 1.5 秒 → 停 1.0 秒 → 循环。
+##
+## 这里有两个**互不影响**的时钟：
+##   · 喷射周期 FLAME_CYCLE（固定 2.5s）—— 攻速再快也不会缩短，塔不会变成连喷；
+##   · 伤害节拍 —— 把 1.5 秒均分给 n 段（n = round(1.5 × 攻速)），段伤害折算过占空比，
+##     所以整场平均 DPS 和「每 1/攻速 秒打一发」的旧机制完全相等（见 flame_seg_damage）。
+##
+## 方向在 _start_flame_spray 里定下，整轮 1.5 秒不再改；目标走出火柱就是空喷，不重新瞄准。
+func _update_flame_spray(delta: float) -> void:
+	if _fj == null or not is_instance_valid(_fj):
+		return
+
+	# 被首领脉冲压制：火柱立刻断掉，这一轮作废；压制结束后重新走一整轮
+	if suppress_timer > 0.0:
+		if _fj_left > 0.0:
+			_end_flame_spray()
+			_fj_gap = 0.0
+		_fj.stop()
+		return
+
+	# —— 喷射中：方向/长度锁死，只播火舌 + 按攻速结算 ——
+	if _fj_left > 0.0:
+		_fj_left -= delta
+		if _fj_left <= 0.0:
+			_end_flame_spray()
+			return
+		_fj.fire(_muzzle_pos(), _fj_dir, _fj_len, delta)
+		_fj_tick += delta
+		var interval := flame_tick_interval()
+		if _fj_tick >= interval:
+			# 用减法而不是清零：掉帧时也不会把伤害段吃掉
+			_fj_tick -= interval
+			_flame_tick()
+		return
+
+	# —— 间隔期 ——
+	_fj.stop()
+	if _fj_gap > 0.0:
+		_fj_gap -= delta
+		if _fj_gap > 0.0:
+			return
+	# 冷却好了但场上没目标：不点火，周期保持「已就绪」，敌人一出现立刻喷
+	var tgt = _find_target()
+	if tgt == null:
+		return
+	_start_flame_spray(tgt)
+
+
+## 点火：按当前目标定下方向与长度，然后整轮锁死。
+func _start_flame_spray(tgt) -> void:
+	# 点火这一瞬间就让龙面向目标：_update_aim 是平滑转向，会慢半拍，
+	# 开头几帧火柱会从龙的侧面喷出来。龙嘴位置又依赖朝向，所以必须先转身再算枪口。
+	var tp: Vector3 = tgt.global_position
+	var ddx := tp.x - global_position.x
+	var ddz := tp.z - global_position.z
+	if _turret != null and is_instance_valid(_turret) and ddx * ddx + ddz * ddz > 0.0001:
+		_turret_yaw = atan2(ddx, ddz)
+		_turret.rotation.y = _turret_yaw
+
+	var muzzle := _muzzle_pos()
+	var d: Vector3 = tgt.global_position + Vector3(0.0, 0.7, 0.0) - muzzle
+	var flat := Vector3(d.x, 0.0, d.z)
+	var hdist := flat.length()
+	if hdist < 0.0001:
+		# 目标和塔重合（几乎不可能）：随手给个方向，别让除零把火柱弄成 NaN
+		flat = Vector3(0.0, 0.0, 1.0)
+		hdist = 0.0001
+	_fj_hdir = flat / hdist
+	_fj_dir = d.normalized() if d.length_squared() > 0.0001 else _fj_hdir
+	# 长度锁死：到目标的水平距离，最短 1.5 格，最长不超过射程
+	_fj_len = clampf(hdist, FLAME_MIN_LEN, range_v)
+
+	# 火舌的粗细直接跟着命中半径走：变异「火墙」连喷出去的火本身都要肉眼可见地变粗
+	# （不只是地上的火烧地变宽），否则会出现「地面宽了、火柱还是原来那根」的割裂感
+	var wide := flame_radius() / FLAME_RADIUS
+	_fj.set_width_mul(wide)
+
+	_fj_left = FLAME_SPRAY_TIME
+	_fj_tick = 0.0
+	_fj.fire(muzzle, _fj_dir, _fj_len, 0.0)
+	# 起手立刻烧一下：和原来「冷却归零时立刻开一枪」一致
+	_flame_tick()
+	_recoil = 1.0
+	Sound.play("shoot", -12.0)
+	# 枪口点火光：颜色跟变异走（焚尽橙红 / 烈焰亮橙 / 火墙深橙），火墙再放大一号
+	var col := Color(1.0, 0.62, 0.26)
+	var md := mutation_def()
+	if md.has("tint"):
+		col = col.lerp(md["tint"] as Color, 0.45)
+	Fx.flash(get_parent(), muzzle + _fj_hdir * 0.25, col, 0.38 * wide, 0.14)
+
+	# 火烧地：火柱扫过的地面被点着，纯视觉、不造成伤害，寿命 2.5 秒
+	_spawn_flame_field()
+
+
+## 在火柱方向的地面上留一条「火烧地」（脚本 scripts/FlameField.gd）。
+## 只负责好看：伤害全部在 _flame_tick 里按火柱结算，这层不参与任何判定。
+## 每轮喷火生成一条，残留的 1 秒正好接上下一轮的 1.5 秒，看起来是持续燃烧的地面。
+func _spawn_flame_field() -> void:
+	var parent := get_parent()
+	if parent == null:
+		return
+	var length := maxf(_fj_len - FLAME_FIELD_START, 1.2)
+	var width := flame_radius() * FLAME_FIELD_WIDE
+	var f := FlameFieldScript.new()
+	parent.add_child(f)
+	# setup 失败（没放 fx_flame_field_*.png）就直接扔掉，喷火本身照常
+	if not f.setup(global_position + _fj_hdir * FLAME_FIELD_START, _fj_hdir, length, width):
+		f.queue_free()
+
+
+## 收火：周期从「开始喷」算起，喷完 1.5 秒，剩下的 1.0 秒就是间隔。
+func _end_flame_spray() -> void:
+	_fj_left = 0.0
+	_fj_tick = 0.0
+	_fj_gap = FLAME_CYCLE - FLAME_SPRAY_TIME
+	if _fj != null and is_instance_valid(_fj):
+		_fj.stop()
+
+
+## 结算一段火柱伤害：沿锁死方向最靠前的敌人吃满额，同一根火柱里的其他敌人吃衰减
+## （TowerData.SPLASH_DMG_COEF，和炮塔溅射同一套系数，玩家已经有认知）。
+## 没有敌人就是空喷 —— 方向不追人，敌人走出火柱就是打不到。
+func _flame_tick() -> void:
+	var parent := get_parent()
+	if parent == null:
+		return
+	var hits := _flame_targets()
+	if hits.is_empty():
+		return
+	var seg := flame_seg_damage()
+	var crit: bool = randf() < float(GameState.buffs["crit"]) + crit_bonus
+	var first = hits[0]["e"]
+	for h in hits:
+		var e = h["e"]
+		var coef := 1.0 if e == first else float(TowerData.SPLASH_DMG_COEF)
+		_deal_flame(e, seg * coef, crit)
+	# 命中反馈只挂在主目标身上，避免每段把屏幕糊满
+	_spawn_flame_hit_mark(first.global_position)
+
+
+## 火柱内的敌人，按「沿火柱方向离枪口多远」从近到远排序。
+## 判定只算水平面：火柱在视觉上是斜着往下喷的，但俯视角下敌人都在同一层地面上，
+## 用三维垂直距离会把稍微站远一点的目标判出火柱。
+func _flame_targets() -> Array:
+	var out: Array = []
+	var muzzle := _muzzle_pos()
+	var radius := flame_radius()
+	var max_len := _fj_len + radius
+	for e in get_tree().get_nodes_in_group("enemies"):
+		if e == null or not is_instance_valid(e) or e.is_hidden():
+			continue
+		var p: Vector3 = e.global_position
+		var rel := Vector3(p.x - muzzle.x, 0.0, p.z - muzzle.z)
+		var along := rel.dot(_fj_hdir)
+		if along < 0.0 or along > max_len:
+			continue
+		if (rel - _fj_hdir * along).length() > radius:
+			continue
+		out.append({"e": e, "d": along})
+	out.sort_custom(func(a, b): return float(a["d"]) < float(b["d"]))
+	return out
+
+
+## 一段火焰伤害：规则和子弹命中完全一致（冰火联动 / 处决协议 / 暴击 / 灼烧 / 词条 / 火电引爆）。
+## dmg 传进来时**不含暴击**，暴击在这里统一 ×2，火电爆炸也按不含暴击的基数算。
+func _deal_flame(e, dmg: float, is_crit: bool) -> void:
+	var mult := 1.0
+	if e.has_method("is_chilled") and e.is_chilled():
+		mult = 1.0 + float(TowerData.CHILL_DMG_BONUS) + float(GameState.buffs.get("melt_dmg", 0.0))
+	var hit := dmg * mult
+	var exec_bonus := float(GameState.buffs.get("execute", 0.0))
+	if exec_bonus > 0.0 and e.hp <= e.max_hp * Bullet.EXECUTE_HP_RATIO:
+		hit *= 1.0 + exec_bonus
+	var final := hit * (2.0 if is_crit else 1.0)
+	# 3 段/秒，每段都飘字会把屏幕糊满：只有暴击显示数字（和旧的喷火口径一致）
+	# 第四个参数 element = "fire"：喷火对霜语者的冰甲是融化伤害（合并后新增的元素规则）
+	e.take_damage(final, is_crit, is_crit, "fire")
+	if dot > 0.0:
+		e.apply_dot(dot, 2.0)
+	Bullet.apply_on_hit_status(e, slow, TowerData.SLOW_TIME)
+	if e.has_method("consume_shock") and e.consume_shock():
+		Bullet.shock_blast(get_parent(), e, hit, is_crit)
+	if mult > 1.0:
+		Fx.flash(get_parent(), e.global_position + Vector3(0.0, 0.65, 0.0),
+				Color(0.80, 0.95, 1.0), 0.42, 0.16)
+
+
+## 火柱烧到主目标的那一下：一小团橙光 + 几颗火星。
+## 比「命中一发子弹」克制得多 —— 火柱每 0.3 秒就要烧一次，太花会盖住火柱本身。
+func _spawn_flame_hit_mark(pos: Vector3) -> void:
+	var parent := get_parent()
+	if parent == null:
+		return
+	var p := pos + Vector3(0.0, 0.95, 0.0)
+	Fx.flash(parent, p, Color(1.0, 0.66, 0.28), 0.42, 0.14)
+	Fx.sparks(parent, p, Vector3.UP, Color(1.0, 0.74, 0.32), 3, PI, 2.6, 0.12, 0.20)
+
 # ---------------------------------------------------------------- 瞄准
 
 ## 这座塔的顶部武器是否会转向目标
@@ -220,6 +528,10 @@ func can_aim() -> bool:
 ## 角度用 lerp_angle 平滑插值，不会瞬移；没目标时保持上一次朝向，看起来像在警戒。
 func _update_aim(delta: float) -> void:
 	if _turret == null or not is_instance_valid(_turret):
+		return
+	# 喷火中：方向和长度都已锁死，龙也得钉在原地不动。
+	# 否则目标中途死掉时龙会转身去找下一个，而火柱还朝着老方向 —— 看起来像火从龙侧面漏出去。
+	if is_flame() and _fj_left > 0.0:
 		return
 	_aim_timer -= delta
 	if _aim_timer <= 0.0:
@@ -389,7 +701,72 @@ func _shoot(target) -> void:
 	b.configure(target, damage, splash, slow, TowerData.SLOW_TIME, is_crit, float(DATA[kind]["bullet"]), chain, dot, kind, level, mutation)
 	_recoil = 1.0
 	Sound.play("shoot")
-	Fx.flash(get_parent(), muzzle, Color(1.0, 0.9, 0.5), 0.22, 0.08)
+	# 开火表现按塔分派：箭塔是四层「弩臂弹弦」，喷火塔在枪口补一记点火光，
+	# 其余（炮塔 / 电塔 / 毒瓶 / 弩车）仍用原来那颗暖白小球。
+	# 注意：毒瓶塔必须落进 else，别被下面的 else-if 漏掉。
+	if kind == Kind.ARROW:
+		_spawn_arrow_shot_fx(muzzle, target, is_crit)
+	elif kind == Kind.FLAME:
+		var col := Color(1.0, 0.62, 0.26)
+		var md := mutation_def()
+		if md.has("tint"):
+			col = col.lerp(md["tint"] as Color, 0.45)
+		Fx.flash(get_parent(), muzzle, col, 0.34, 0.12)
+	else:
+		Fx.flash(get_parent(), muzzle, Color(1.0, 0.9, 0.5), 0.22, 0.08)
+
+
+## 箭塔开火的表现：弩臂弹弦 —— 枪口一记爆闪 + 离弦碎屑 + 一道横着的弩弦 + 顺着箭飞出去的方向划一道箭轨。
+##
+## 改造前这里和炮塔/喷火塔共用同一颗黄色小球，看不出「射的是箭」；
+## 而光有 0.07 秒的小白点其实也看不出来（箭塔 1.45 发/秒，一眨眼就过去了），
+## 所以这里叠了四层，让「开火」这件事在一整段动画里都读得出来。
+##
+## 箭轨只拉 1.5~2.3 格：箭本身是以 26 单位/秒飞出去的一张方片，曳光再长就会盖住箭、
+## 变成两道光在飞。它只是「离弦」那一瞬的残影；飞行中的连续拖尾由 Bullet 自己负责。
+##
+## 起点要沿射击方向往前挪一点、再略微抬高：出弹点即使抬到塔顶附近，模型也还有一小截塔尖，
+## 特效从塔内部开始就有一半被屋顶吃掉（实测只剩一道白线斜插在屋顶上）。
+func _spawn_arrow_shot_fx(muzzle: Vector3, target, is_crit: bool) -> void:
+	var parent := get_parent()
+	if parent == null:
+		return
+	var dir := Vector3(0.0, 0.0, 1.0)
+	if is_instance_valid(target):
+		var d: Vector3 = target.global_position + Vector3(0.0, 0.7, 0.0) - muzzle
+		if d.length_squared() > 0.0001:
+			dir = d.normalized()
+
+	# 等级 + 暴击一起放大：满级、暴击的那一发要「一眼看出更狠」
+	var boost := (1.5 if is_crit else 1.0) * (1.0 + 0.10 * float(level - 1))
+	var col := _arrow_fx_color()
+	var start := muzzle + dir * 0.34 + Vector3(0.0, 0.14, 0.0)
+
+	# 1) 枪口爆闪：比原来大一倍、持续时间翻倍
+	Fx.flash(parent, start, col, 0.30 * boost, 0.13)
+
+	# 2) 离弦碎屑：少量火星顺着箭飞走的方向喷出去，强化「这一下是射出去的」
+	Fx.sparks(parent, start, dir, col, int(3 + (2 if is_crit else 0)), 0.40,
+			6.0 * boost, 0.11 * boost, 0.17)
+
+	# 3) 弩弦：横在枪口、垂直于射击方向的一道短线 —— 弓弦弹回的那一瞬
+	var perp := dir.cross(Vector3.UP)
+	if perp.length_squared() > 0.0001:
+		perp = perp.normalized() * 0.42 * boost
+		Fx.tracer(parent, start - perp, start + perp, col, 0.05, 0.09, 0.0, 0.75)
+
+	# 4) 箭轨：内芯最亮、外圈柔光，顺着箭的方向划出去
+	Fx.tracer(parent, start, start + dir * 1.55 * boost, Color(1.0, 0.98, 0.92),
+			0.085 * boost, 0.15, 0.30 * boost, 0.95)
+
+
+## 箭塔特效的主色：默认暖白；选了变异就掺入变异色，和塔身光环对得上
+func _arrow_fx_color() -> Color:
+	var base := Color(1.0, 0.94, 0.74)
+	var md := mutation_def()
+	if md.has("tint"):
+		base = base.lerp(md["tint"] as Color, 0.55)
+	return base
 
 # ---------------------------------------------------------------- 持续射线（冰塔）
 
@@ -399,6 +776,9 @@ func _shoot(target) -> void:
 
 ## 冰塔命中特效的序列帧数量：res://textures/fx_ice_0.png、fx_ice_1.png …（缺帧自动跳过）
 const ICE_FX_FRAMES := 2
+
+## 变异「碎冰」击杀特效的序列帧数量：res://textures/fx_iceburst_0.png … fx_iceburst_5.png
+const ICE_BURST_FX_FRAMES := 6
 
 ## 光环塔（变异「霜环」）刷减速的间隔：没必要每帧遍历全场敌人
 const AURA_TICK := 0.2
@@ -433,6 +813,7 @@ func _update_aura(delta: float) -> void:
 	if _fog_tick > 0.0:
 		return
 	_fog_tick = AURA_TICK
+	var fx_parent := get_parent()
 	for e in get_tree().get_nodes_in_group("enemies"):
 		if e == null or not is_instance_valid(e) or e.is_hidden():
 			continue
@@ -440,6 +821,10 @@ func _update_aura(delta: float) -> void:
 			continue
 		# 只挂减速：毒 / 流血这些「弹药词条」本质上属于攻击，不造成伤害的塔不触发
 		e.apply_slow(slow, TowerData.SLOW_TIME)
+		# 冰雾拖尾：罩在雾里的敌人脚下不断留下霜迹，每 AURA_TICK 落一摊，
+		# 靠敌人自己往前走把相邻的霜迹拉成一串（飞行怪不落地，跳过）
+		if not e.flying and fx_parent != null:
+			Fx.frost_puff(fx_parent, e.global_position, 1.4)
 
 
 ## 两发之间的间隔（秒）：直接用原来的攻速（1/攻速），改造前是多少现在就还是多少。
@@ -508,9 +893,14 @@ func _beam_apply(tgt) -> void:
 			if splash <= 0.0 or e.global_position.distance_squared_to(pos) > splash * splash:
 				continue
 			coef = float(TowerData.SPLASH_DMG_COEF)
-		e.take_damage(dmg * coef, crit, true)
+		# 冰系伤害传 element = "ice"：霜语者的冰甲只吃火，冰打上去要按护甲规则处理
+		var killed: bool = e.take_damage(dmg * coef, crit, true, "ice")
 		# 每次命中都刷一次减速时长：只要敌人还在射线里，就一直是冻住的
 		Bullet.apply_on_hit_status(e, slow, TowerData.SLOW_TIME)
+		# 变异「碎冰」：被这道射线直接打死的主目标，在倒下的地方炸开一团冰爆。
+		# 只认主目标 —— 溅射一次打中一群时，一人一团会把屏幕糊满。
+		if killed and e == tgt and mutation == "frost_shard":
+			_spawn_ice_burst(pos)
 
 	_spawn_ice_hit(pos)
 
@@ -535,6 +925,24 @@ func _spawn_ice_hit(pos: Vector3) -> void:
 		return
 	Fx.flash(parent, p, Color(0.62, 0.90, 1.0), 0.6, 0.18)
 	Fx.ring(parent, pos + Vector3(0.0, 0.2, 0.0), Color(0.55, 0.85, 1.0), 0.7, 0.22)
+
+
+## 变异「碎冰」击杀特效：敌人倒下的地方炸开一大团冰爆（res://textures/fx_iceburst_0…5）。
+## 比射线命中的碎冰大一号、慢一档 —— 「打中」和「打死了」在视觉上要能一眼分开。
+## 素材本身偏白，贴图乘一层更深的冰蓝压出颜色，再补一颗亮芯 + 一圈贴地冲击环。
+## 没放贴图时回退成程序化的冰蓝闪光 + 冲击环，工程照样能跑。
+func _spawn_ice_burst(pos: Vector3) -> void:
+	var parent := get_parent()
+	if parent == null:
+		return
+	var p := pos + Vector3(0.0, 0.85, 0.0)
+	if Fx.burst_seq(parent, p, "fx_iceburst", ICE_BURST_FX_FRAMES, 4.6, 0.62, 0.20,
+			Color(0.80, 0.96, 1.0), Color(0.58, 0.88, 1.0)):
+		Fx.flash(parent, p, Color(0.88, 0.98, 1.0), 0.95, 0.24)
+		Fx.ring(parent, pos + Vector3(0.0, 0.2, 0.0), Color(0.62, 0.92, 1.0), 1.1, 0.34)
+		return
+	Fx.flash(parent, p, Color(0.62, 0.92, 1.0), 0.9, 0.26)
+	Fx.ring(parent, pos + Vector3(0.0, 0.2, 0.0), Color(0.55, 0.88, 1.0), 1.1, 0.32)
 
 
 ## 「由场景指向相机」的单位向量：特效往这个方向偏一点就不会被目标身体挡住
@@ -682,11 +1090,25 @@ func _build_base() -> void:
 		_beam.transform = Transform3D.IDENTITY
 		add_child(_beam)
 
+	# 持续喷火型（喷火塔）：同样的挂法 —— 火柱是一条钉在世界坐标里的火舌。
+	# setup() 失败（没放 fx_flame_jet_*.png）时 _fj 保持 null，这座塔自动回退成旧的「火球」。
+	if kind == Kind.FLAME:
+		var fj := FlameJetScript.new()
+		fj.name = "FlameJet"
+		fj.top_level = true
+		fj.transform = Transform3D.IDENTITY
+		add_child(fj)
+		if fj.setup():
+			_fj = fj
+		else:
+			fj.queue_free()
+
 
 func _build_body() -> void:
 	if _body_root != null and is_instance_valid(_body_root):
 		_body_root.free()
 	_turret = null
+	_flame_mouth_fwd = 0.0
 	_body_root = Node3D.new()
 	_body_root.name = "Body"
 	add_child(_body_root)
@@ -765,6 +1187,9 @@ func _build_custom_tower() -> bool:
 	if _base != null and is_instance_valid(_base):
 		_base.visible = false
 	muzzle_y = target_h * float(MUZZLE_RATIO.get(kind, 0.88))
+	# 火塔：枪口在龙嘴上，按塔高换算前探距离（模型没换成龙时保持 0，退回塔轴线）
+	if kind == Kind.FLAME and _turret != null:
+		_flame_mouth_fwd = target_h * FLAME_MOUTH_RATIO
 	return true
 
 

@@ -197,7 +197,7 @@ const MUTATIONS := {
 		},
 		{
 			"id": "flame_wall", "name": "火墙",
-			"desc": "获得溅射（+1.6），射程 +10%\n喷出一条火墙而不是火柱",
+			"desc": "火柱加宽到 2.2 倍，射程 +10%\n从一根火柱变成一条火墙",
 			"mods": {"splash_add": 1.6, "range_mul": 1.1},
 			"tint": Color(1.0, 0.90, 0.45),
 		},
@@ -289,7 +289,7 @@ const DATA := {
 	Kind.FLAME: {
 		"name": "喷火塔", "cost": 90, "dmg": 5.0, "rate": 3.0, "range": 5.6,
 		"splash": 0.0, "slow": 0.0, "chain": 0, "dot": 13.0, "color": Color(1.0, 0.55, 0.30),
-		"bullet": 20.0, "desc": "点燃目标持续灼烧；命中被冰塔减速的敌人时伤害大幅提高"
+		"bullet": 20.0, "desc": "间歇喷火：每 2.5s 喷 1.5s，方向锁定；被烧到的敌人持续灼烧"
 	},
 	Kind.BOUNCE: {
 		"name": "弹射塔", "cost": 75, "dmg": 16.0, "rate": 1.0, "range": 6.2,

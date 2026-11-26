@@ -27,8 +27,12 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lowpoly_kit import *  # noqa: F401,F403  (图元 + 色板 + save_glb)
+import gen_dragon_model as dragon_mod  # noqa: E402  火塔塔顶的火龙造型
 
 BOUNCE_GLOW = (0.45, 0.95, 0.62)
 TESLA_ORB = (0.70, 0.94, 1.00)
@@ -98,6 +102,266 @@ def build_arrow(level):
         t += keg((-hw - 0.075, y0 - 0.06, 0.08), 0.048, 0.125)
         t += box((0.0, ry + 0.095, hw + 0.02), (0.13, 0.05, 0.03), GOLD)
     return t
+
+
+# ---------------------------------------------------------------- 箭塔·八角木骨
+## KR 箭塔（go_towers_archers）最好认的结构：一圈木柱 + 柱间石墙板 + 八角箭台 +
+## 八角栏杆 + 正面红白靶心。下面三个变异都复用这套骨架，再各自加一层完全不同的"帽子"，
+## 保证远远看过去三座塔的轮廓互不相同。
+WOOD_L = (0.58, 0.41, 0.24)
+MARBLE = (0.87, 0.89, 0.91)
+GALE = (0.42, 0.88, 0.56)       # 疾风弩：青绿
+GALE_D = shade(GALE, 0.66)
+PIERCE = (0.80, 0.84, 0.36)     # 裂空箭：橄榄黄
+SPLIT = (0.36, 0.88, 1.00)      # 穿云矢：冰青
+SPLIT_D = shade(SPLIT, 0.62)
+
+
+def rot_y(tris, center, a):
+    """绕自身中心转 Y —— box() 的 ry 是绕原点转的，用在环状排布上会把零件甩飞。"""
+    return xf(tris, ry=a, pivot=center) if a else tris
+
+
+def oct_frame(center, r, count, h, wood, panel, panel_scale=0.86, post=0.055):
+    """八角木骨：一圈立柱 + 柱间墙板。"""
+    cx, cy, cz = center
+    side = 2.0 * r * math.sin(math.pi / count)
+    t = []
+    for i in range(count):
+        a = TAU * i / count + math.pi / count
+        px, pz = cx + math.cos(a) * r, cz + math.sin(a) * r
+        t += rot_y(box((px, cy + h * 0.5, pz), (post, h, post), wood), (px, cy + h * 0.5, pz), -a)
+        if panel:
+            qx, qz = cx + math.cos(a) * r * 0.955, cz + math.sin(a) * r * 0.955
+            t += rot_y(box((qx, cy + h * 0.5, qz), (0.035, h * 0.88, side * panel_scale), panel),
+                       (qx, cy + h * 0.5, qz), -a)
+    return t
+
+
+def oct_deck(cx, cz, y, r, col, seg=8, h=0.07):
+    """八角箭台（带一点外沿，像木板挑出来的栈台）。"""
+    return lathe([(r * 0.98, 0.0), (r * 1.12, h * 0.45), (r * 1.02, h)], col, seg=seg,
+                 center=(cx, y, cz))
+
+
+def oct_rail(center, r, count, h, col):
+    """八角栏杆：短立柱 + 顶栏。"""
+    cx, cy, cz = center
+    side = 2.0 * r * math.sin(math.pi / count)
+    t = []
+    for i in range(count):
+        a = TAU * i / count + math.pi / count
+        px, pz = cx + math.cos(a) * r, cz + math.sin(a) * r
+        t += rot_y(box((px, cy + h * 0.5, pz), (0.032, h, 0.032), col), (px, cy + h * 0.5, pz), -a)
+        t += rot_y(box((px, cy + h, pz), (0.028, 0.028, side * 0.92), col), (px, cy + h, pz), -a)
+    return t
+
+
+def bullseye(y, z, scale=1.0, outer=WHITE, inner=RED):
+    """正面靶心：白-红-白-红同心圆（箭塔的招牌特征）。"""
+    t = []
+    for k, (rr, cc) in enumerate(((0.125, outer), (0.096, inner), (0.060, outer), (0.026, inner))):
+        t += cyl_z((0.0, y, z + k * 0.011), rr * scale, rr * scale, 0.011, cc, seg=12)
+    return t
+
+
+def pennant(y, x, z, h, col, flip=1.0):
+    """三角小旗：细杆 + 布面（用两个三角面表达，省三角形）。"""
+    t = cyl((x, y, z), 0.013, 0.010, h + 0.10, WOOD_D, seg=5)
+    top = y + h + 0.08
+    w = 0.085 * flip
+    a = (x, top, z)
+    b = (x, top - 0.11, z)
+    c = (x + w, top - 0.045, z)
+    t += [(a, b, c, col), (a, c, b, col)]
+    return t
+
+
+# ---------------------------------------------------------------- 箭塔·疾风弩（gale）
+def build_arrow_gale():
+    """疾风弩：矮而宽的**开放式**箭台 + 高旗杆 + 双联轻弩。
+
+    轮廓要点：没有屋顶（顶部敞开，能看到弩）、塔身压得低、四周插满细旗杆，
+    远看就是一团青绿色的"风"；和另外两条线的"封闭高塔 / 晶环"完全不一样。
+    """
+    r = 0.34
+    t = plinth(2, 0.36, col=STONE_L)
+    y0 = 2 * COURSE + 0.045
+
+    # 八角木屋（墙板换成浅木色，塔身比另外两条线更"方"）
+    t += oct_frame((0.0, y0, 0.0), r, 8, 0.58, WOOD_L, shade(WOOD, 0.80))
+    py = y0 + 0.58
+
+    # 箭台 + 栏杆 + 靶心
+    t += oct_deck(0.0, 0.0, py - 0.03, r * 1.04, shade(WOOD, 1.18))
+    t += oct_rail((0.0, py + 0.04, 0.0), r * 1.04, 8, 0.14, shade(WOOD, 1.30))
+    t += bullseye(py - 0.24, r * 1.10, 0.56, WHITE, GALE_D)
+
+    # 四角旗杆 + 青绿旗（"疾风"的视觉语言）
+    for i in range(4):
+        a = TAU * i / 4.0 + math.pi / 4.0
+        px, pz = math.cos(a) * r * 0.92, math.sin(a) * r * 0.92
+        hh = 0.64 if i % 2 == 0 else 0.46
+        t += pennant(py + 0.10, px, pz, hh, GALE if i % 2 == 0 else GALE_D)
+
+    # 抬高的弩架：四根细腿托起一个小圆台，把双联轻弩举到接近塔顶
+    # （子弹是从弩口飞出去的，弩举得够高才不会看起来"从塔肚子里射箭"）
+    ry = py + 0.50
+    for i in range(4):
+        a = TAU * i / 4.0 + math.pi / 4.0
+        lx, lz = math.cos(a) * 0.185, math.sin(a) * 0.185
+        t += xf(cyl((0.0, 0.0, 0.0), 0.020, 0.016, 0.54, WOOD_D, seg=5),
+                t=(lx, py + 0.01, lz), rx=-math.sin(a) * 0.08, rz=math.cos(a) * 0.08)
+    t += lathe([(0.195, 0.0), (0.222, 0.022), (0.195, 0.044)], shade(WOOD, 1.15), seg=8,
+               center=(0.0, ry, 0.0))
+
+    # 塔身挂两个箭袋：一眼就是"快速连射"的塔
+    for sx in (-1, 1):
+        t += keg((sx * (r + 0.052), y0 + 0.22, 0.05), 0.045, 0.18)
+
+    # 顶部双联轻弩（独立 Turret，会跟着目标转）
+    pivot = (0.0, ry + 0.05, 0.0)
+    u = cyl((0.0, 0.0, 0.0), 0.10, 0.088, 0.05, WOOD_D, seg=10)
+    u += box((0.0, 0.068, -0.03), (0.15, 0.062, 0.17), shade(WOOD, 1.05))
+    u += box((0.0, 0.112, 0.06), (0.088, 0.042, 0.30), shade(WOOD, 1.16))
+    for sx in (-1, 1):
+        # 一对轻弩臂（向前张开）
+        u += xf(box((0.0, 0.0, 0.0), (0.235, 0.026, 0.030), shade(WOOD, 0.86)),
+                t=(sx * 0.072, 0.132, 0.10), ry=sx * 0.60)
+        u += box((sx * 0.088, 0.132, 0.16), (0.170, 0.008, 0.008), BONE)
+        # 双箭
+        u += cyl_z((sx * 0.042, 0.134, 0.09), 0.010, 0.009, 0.20, BONE, seg=6)
+        u += xf(cone((0.0, 0.0, 0.0), 0.017, 0.055, STEEL, seg=5),
+                t=(sx * 0.042, 0.134, 0.29), rx=math.pi * 0.5)
+    u += pennant(0.10, 0.0, -0.115, 0.19, GALE)
+    u = xf(u, t=pivot)
+    return t, u, pivot
+
+
+# ---------------------------------------------------------------- 箭塔·裂空箭（pierce）
+def build_arrow_pierce():
+    """裂空箭：高而瘦的重装塔 —— 石砌塔身 + 三道铁箍 + 四道扶壁 + 一台巨型穿甲弩。
+
+    轮廓要点：三座里最高最窄，塔身正面嵌一根铁质长箭浮雕，弩臂特别长、箭特别粗，
+    颜色是橄榄黄 + 铁灰，和"木色小箭台""青色晶塔"完全分得开。
+    """
+    t = plinth(3, 0.30, ch=0.20, col=STONE_D)
+    y0 = 3 * 0.20 + 0.045
+
+    # 高瘦石鼓
+    t += cyl((0.0, y0, 0.0), 0.255, 0.222, 0.86, shade(STONE, 0.92), seg=10)
+    for fy in (0.12, 0.40, 0.68):
+        t += cyl((0.0, y0 + fy, 0.0), 0.264, 0.264, 0.034, IRON, seg=10)
+
+    # 四道扶壁（下宽上窄，给"重装"的份量）
+    for i in range(4):
+        a = TAU * i / 4.0 + math.pi / 4.0
+        px, pz = math.cos(a) * 0.245, math.sin(a) * 0.245
+        b = taper((0.0, 0.0, 0.0), (0.115, 0.085), (0.055, 0.055), 0.40, STONE_L)
+        t += xf(b, t=(px, y0 + 0.20, pz), ry=-a)
+
+    # 顶部平台 + 城垛
+    py = y0 + 0.86
+    t += cyl((0.0, py, 0.0), 0.268, 0.300, 0.055, STONE_L, seg=10)
+    t += oct_frame((0.0, py + 0.055, 0.0), 0.285, 8, 0.10, IRON, None, post=0.045)
+
+    # 正面：铁质长箭浮雕（取代靶心 —— 这条线是"穿透"不是"打靶"）
+    rz = 0.268
+    t += box((0.0, py - 0.34, rz), (0.052, 0.46, 0.022), IRON)
+    t += xf(cone((0.0, 0.0, 0.0), 0.062, 0.16, STEEL, seg=4),
+            t=(0.0, py - 0.09, rz), rx=math.pi * 0.5)
+    for sx in (-1, 1):
+        t += box((sx * 0.070, py - 0.50, rz), (0.026, 0.10, 0.018), PIERCE)
+
+    # 两侧窄长旗 + 底部铁刺
+    for sx in (-1, 1):
+        t += banner((sx * 0.315, py - 0.26, 0.0), 0.095, 0.34, 0.13, PIERCE)
+    t += spikes(6, (0.0, y0 + 0.01, 0.0), 0.30, 0.10, 0.030, IRON, tilt=0.85, phase=0.2)
+
+    # 顶部巨型穿甲弩（独立 Turret）
+    pivot = (0.0, py + 0.10, 0.0)
+    u = cyl((0.0, 0.0, 0.0), 0.115, 0.100, 0.052, IRON, seg=10)
+    u += box((0.0, 0.070, -0.03), (0.16, 0.075, 0.19), shade(WOOD, 0.92))
+    u += box((0.0, 0.120, 0.06), (0.105, 0.058, 0.44), shade(WOOD, 0.80))   # 弩身
+    u += box((0.0, 0.152, 0.06), (0.030, 0.014, 0.42), IRON)                # 滑轨
+    limb = 0.30
+    for sx in (-1, 1):
+        u += xf(box((0.0, 0.0, 0.0), (limb, 0.046, 0.038), STEEL_D),
+                t=(sx * 0.175, 0.150, 0.02), ry=sx * 0.92)
+        u += box((sx * 0.20, 0.150, -0.10), (0.012, 0.010, 0.34), BONE)     # 弦
+        u += box((sx * 0.115, 0.130, 0.02), (0.045, 0.085, 0.045), IRON)    # 铁夹
+    # 巨箭：粗杆 + 钢箭头 + 尾羽
+    u += cyl_z((0.0, 0.148, -0.10), 0.024, 0.021, 0.66, WOOD_D, seg=8)
+    u += xf(cone((0.0, 0.0, 0.0), 0.048, 0.155, STEEL, seg=6),
+            t=(0.0, 0.148, 0.555), rx=math.pi * 0.5)
+    for sx in (-1, 1):
+        u += box((sx * 0.035, 0.148, -0.30), (0.010, 0.055, 0.10), PIERCE)
+    u = xf(u, t=pivot)
+    return t, u, pivot
+
+
+# ---------------------------------------------------------------- 箭塔·穿云矢（split）
+def build_arrow_split():
+    """穿云矢：白石塔身 + 青色冰晶肋 + 一圈悬浮碎晶 + 水晶双叉弩。
+
+    轮廓要点：中等身高，但塔顶套着一圈**浮空晶环**（环和塔身之间是空的，读起来像魔法），
+    颜色是白石 + 冰青，一眼就是"会弹射的箭"。
+    """
+    r = 0.36
+    t = plinth(2, 0.35, col=MARBLE)
+    y0 = 2 * COURSE + 0.045
+
+    # 白石鼓身 + 收口（比疾风弩细、比裂空箭矮）
+    t += cyl((0.0, y0, 0.0), 0.286, 0.258, 0.90, MARBLE, seg=12)
+    t += cyl((0.0, y0 + 0.88, 0.0), 0.264, 0.282, 0.045, shade(MARBLE, 1.06), seg=12)
+
+    # 四道冰晶肋（竖向晶体条，塔身的"魔法纹路"）
+    for i in range(4):
+        a = TAU * i / 4.0 + math.pi / 4.0
+        px, pz = math.cos(a) * 0.272, math.sin(a) * 0.272
+        t += xf(octa((0.0, 0.0, 0.0), 0.028, 0.34, SPLIT), t=(px, y0 + 0.44, pz))
+    # 正面靶心（保留箭塔的识别符号，换成青白配色）
+    t += bullseye(y0 + 0.44, 0.284, 0.70, ICE_L, SPLIT_D)
+
+    py = y0 + 0.925
+
+    # 八角箭台 + 栏杆
+    t += oct_deck(0.0, 0.0, py - 0.02, r * 1.02, shade(MARBLE, 0.98))
+    t += oct_rail((0.0, py + 0.04, 0.0), r * 1.02, 8, 0.13, shade(MARBLE, 1.10))
+
+    # 悬浮晶环：一圈细环 + 6 颗浮空碎晶（环与塔身留空，看得出是"悬"的）
+    ry = py + 0.30
+    t += lathe([(0.372, 0.0), (0.390, 0.014), (0.372, 0.028)], SPLIT, seg=8,
+               center=(0.0, ry, 0.0))
+    for i in range(6):
+        a = TAU * i / 6.0
+        cx, cz = math.cos(a) * 0.378, math.sin(a) * 0.378
+        t += octa((cx, ry + 0.055 + 0.012 * (i % 2), cz), 0.036, 0.080, SPLIT)
+        t += octa((cx, ry + 0.055 + 0.012 * (i % 2), cz), 0.018, 0.036, ICE_L)
+
+    # 两侧冰青旗
+    for sx in (-1, 1):
+        t += banner((sx * 0.30, py + 0.02, 0.0), 0.09, 0.26, 0.11, SPLIT_D, trim=SPLIT)
+
+    # 水晶双叉弩（独立 Turret）
+    pivot = (0.0, py + 0.11, 0.0)
+    u = cyl((0.0, 0.0, 0.0), 0.095, 0.085, 0.05, shade(MARBLE, 1.05), seg=10)
+    u += box((0.0, 0.070, -0.02), (0.13, 0.055, 0.16), shade(MARBLE, 0.94))
+    u += octa((0.0, 0.145, 0.02), 0.062, 0.105, SPLIT)          # 中央晶核
+    u += octa((0.0, 0.145, 0.02), 0.032, 0.055, ICE_L)
+    for sx in (-1, 1):
+        # 晶臂：向外上方张开的两截晶体
+        u += xf(octa((0.0, 0.0, 0.0), 0.040, 0.185, SPLIT),
+                t=(sx * 0.175, 0.185, 0.06), rz=sx * 1.20)
+        u += xf(octa((0.0, 0.0, 0.0), 0.026, 0.085, ICE_L),
+                t=(sx * 0.255, 0.235, 0.06), rz=sx * 1.35)
+        u += box((sx * 0.085, 0.150, 0.12), (0.115, 0.007, 0.007), ICE_L)   # 弦
+    # 短矢：青白晶杆 + 亮头
+    u += cyl_z((0.0, 0.150, 0.06), 0.013, 0.011, 0.24, ICE_L, seg=6)
+    u += xf(cone((0.0, 0.0, 0.0), 0.022, 0.07, SPLIT, seg=5),
+            t=(0.0, 0.150, 0.29), rx=math.pi * 0.5)
+    u = xf(u, t=pivot)
+    return t, u, pivot
 
 
 # ---------------------------------------------------------------- 炮塔
@@ -266,8 +530,21 @@ def build_tesla(level):
 
 
 # ---------------------------------------------------------------- 火塔
+
+## 塔顶火龙的缩放（L1 → L3 逐渐长大）
+FLAME_DRAGON_SCALE = (0.34, 0.39, 0.44)
+
+## 龙脚相对火盆底面的高度（火盆顶在 y0 + 0.42）
+FLAME_DRAGON_Y = 0.42
+
+
 def build_flame(level):
-    """#41-44：暗红石座 + 火盆 + 紫色晶簇。火焰用三层锥做体积。"""
+    """#41-44：暗红石座 + 火盆 + 火龙。
+
+    底座 / 石塔身 / 铁箍 / 紫晶簇 / 铁刺全部沿用原来的造型，只把火盆里那簇
+    火焰锥换成一只完整的火龙（tools/gen_dragon_model.py 的 build()）。
+    龙单独作为 Turret 节点返回：塔身不动，只有龙围着塔顶转向敌人喷火。
+    """
     t = plinth(level, 0.30, col=BRICK)
     y0 = level * COURSE
 
@@ -277,13 +554,6 @@ def build_flame(level):
                shade(BRICK, 0.74), seg=12)
     t += lathe([(0.280, y0 + 0.412), (0.255, y0 + 0.432)], EMBER, seg=12)
     t += cyl((0.0, y0 + 0.360, 0.0), 0.328, 0.328, 0.024, IRON, seg=12)
-
-    # 火焰：外焰 → 中焰 → 亮芯
-    fy = y0 + 0.425
-    t += cone((0.0, fy, 0.0), 0.150, 0.36 + 0.06 * level, EMBER, seg=7)
-    t += cone((0.0, fy, 0.0), 0.095, 0.50 + 0.07 * level, FIRE, seg=7)
-    t += cone((0.050, fy, -0.040), 0.060, 0.42 + 0.05 * level, FIRE_HOT, seg=6)
-    t += cone((-0.055, fy, 0.035), 0.048, 0.34 + 0.05 * level, FIRE_HOT, seg=6)
 
     # 底部紫晶簇
     for i in range(4):
@@ -299,8 +569,20 @@ def build_flame(level):
         for sx in (-1, 1):
             t += xf(cone((0.0, 0.0, 0.0), 0.052, 0.20, BONE, seg=5),
                     t=(sx * 0.285, y0 + 0.400, 0.0), rz=sx * 0.62)
-        t += spikes(5, (0.0, fy + 0.50, 0.0), 0.125, 0.095, 0.024, EMBER, tilt=0.7, phase=0.9)
-    return t
+
+    # 龙脚边的一圈小火舌：让「龙从火盆里站起来」有个出处
+    fy = y0 + 0.418
+    for i in range(5):
+        a = TAU * i / 5.0 + 0.3
+        t += cone((math.cos(a) * 0.180, fy, math.sin(a) * 0.180),
+                  0.055, 0.10 + 0.02 * level, EMBER, seg=5)
+
+    # 火龙：整体缩放后踩在炭火面上，作为可转向的 Turret
+    s = FLAME_DRAGON_SCALE[level - 1]
+    pivot = (0.0, y0 + FLAME_DRAGON_Y, 0.0)
+    drg = dragon_mod.build()
+    drg = xf(drg, s=(s, s, s), t=pivot)
+    return t, drg, pivot
 
 
 # ---------------------------------------------------------------- 弹射塔
@@ -343,7 +625,6 @@ def build_bounce(level):
     return t, u, piv
 
 
-# ---------------------------------------------------------------- 毒瓶塔
 POISON_GLOW = (0.42, 0.95, 0.25)
 POISON_D = (0.16, 0.50, 0.14)
 CLOTH = (0.88, 0.86, 0.80)
@@ -458,6 +739,20 @@ TOWERS = {
 MAX_LEVEL = 3
 
 
+TOWERS = {
+    "arrow": (build_arrow, "箭塔"),
+    "cannon": (build_cannon, "炮塔"),
+    "frost": (build_frost, "冰塔"),
+    "sniper": (build_sniper, "狙击塔"),
+    "tesla": (build_tesla, "电塔"),
+    "flame": (build_flame, "火塔"),
+    "bounce": (build_bounce, "弹射塔"),
+    "poison": (build_poison, "毒瓶塔"),
+}
+
+MAX_LEVEL = 3
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -494,6 +789,26 @@ def main() -> int:
     total += len(body) + len(turret)
     print("%-22s %-8s %3d %5d" % (name + ".glb", "双管炮塔", MAX_LEVEL,
                                   len(body) + len(turret)))
+
+    # 箭塔三条变异线的专属外观：文件名后缀 = 变异 id 的最后一段
+    # （arrow_gale → gale / arrow_pierce → pierce / arrow_split → split），
+    # Tower.gd 的 _custom_model_path() 会自动优先加载它们。
+    for name, label, fn in (
+        ("tower_arrow_l3_gale", "疾风弩", build_arrow_gale),
+        ("tower_arrow_l3_pierce", "裂空箭", build_arrow_pierce),
+        ("tower_arrow_l3_split", "穿云矢", build_arrow_split),
+    ):
+        body, turret, pivot = fn()
+        save_glb(os.path.join(args.out, name + ".glb"), body, name,
+                 turret=turret, turret_pivot=pivot)
+        tris = body + turret
+        total += len(tris)
+        xs = [p[0] for a, b, c, _ in tris for p in (a, b, c)]
+        ys = [p[1] for a, b, c, _ in tris for p in (a, b, c)]
+        h = max(ys) - min(ys)
+        w = max(xs) - min(xs)
+        print("%-22s %-8s %3d %5d %5d %6.2f %6.2f %6.2f" % (
+            name + ".glb", label, MAX_LEVEL, len(tris), 0, h / w, h, w))
 
     print("total tris = %d, out = %s" % (total, args.out))
     return 0

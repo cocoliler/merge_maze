@@ -1279,7 +1279,7 @@ func _process(delta: float) -> void:
 		var fdir := direct_target - global_position
 		fdir.y = 0.0
 		var fdist := fdir.length()
-		var fstep := base_speed * slow_factor * slow_extra * (1.0 + _haste) * delta
+		var fstep := base_speed * speed_mul() * delta
 		if fdist <= fstep:
 			progress += fdist
 			_leak()
@@ -1301,8 +1301,10 @@ func _process(delta: float) -> void:
 	dir.y = 0.0
 	var dist := dir.length()
 	# 游泳比走路慢：玩家有时间把塔的火力挪到它上岸的那一侧
+	# 游泳系数乘在减速下限**外面**：泡在水里的怪即使已经到 0.25 倍速下限，
+	# 也仍然要比岸上的同类慢 —— 下限只约束「减速」这一层，不该把地形惩罚一起吃掉。
 	var spd := base_speed * (SWIM_SPEED if _swimming else 1.0)
-	var step := spd * slow_factor * slow_extra * (1.0 + _haste) * delta
+	var step := spd * speed_mul() * delta
 
 	if dist <= step:
 		progress += dist
@@ -1632,10 +1634,13 @@ func _shield_hit_fx(element: String, dmg: float) -> void:
 
 ## element：伤害属性（"" = 物理，"fire" = 火）。目前只有冰甲关心它 ——
 ## 火属性削冰甲时 ×EnemyData.ICE_FIRE_MULT，其它属性 1 倍。
+## 返回值 = 这一次命中是否把这只怪打死了。
+## 冰塔的「碎冰」变异要据此在尸体位置放冰爆（见 Tower._beam_apply），
+## 所以这里不能只是 void —— 但所有老调用点忽略返回值也完全兼容。
 func take_damage(amount: float, crit: bool = false, show_number: bool = true,
-		element: String = "") -> void:
+		element: String = "") -> bool:
 	if _dying or _rolled:
-		return
+		return false
 	# 破甲先扣护甲，易伤再放大伤害：两个都只影响「这一次命中之后」的攻击
 	var eff_armor := maxf(armor - _armor_break, 0.0)
 	if eff_armor > 0.0:
@@ -1655,13 +1660,13 @@ func take_damage(amount: float, crit: bool = false, show_number: bool = true,
 			if show_number and on_shield >= 8.0:
 				Fx.damage_number(get_parent(), global_position + Vector3(0.0, 0.9, 0.0),
 					str(int(round(on_shield))), Color(0.60, 0.94, 1.0), false)
-			return
+			return false
 		var overflow := (on_shield - ice_shield) / mul
 		ice_shield = 0.0
 		_break_shield()
 		amount = overflow
 		if amount <= 0.0:
-			return
+			return false
 
 	hp -= amount
 	_update_bar()
@@ -1672,6 +1677,8 @@ func take_damage(amount: float, crit: bool = false, show_number: bool = true,
 		Fx.damage_number(get_parent(), global_position + Vector3(0.0, 0.7, 0.0), str(int(round(amount))), Color(1.0, 0.35, 0.35) if crit else Color(1.0, 0.9, 0.7), crit)
 	if hp <= 0.0:
 		_die()
+		return true
+	return false
 
 
 ## 无视护甲的真实伤害（中毒的结算入口）：护甲只挡「被打」的部分，挡不住毒性
@@ -1687,9 +1694,21 @@ func _take_raw(amount: float) -> void:
 func apply_slow(factor: float, time: float) -> void:
 	# 首领的减速抗性：一次减速最多只能削到 slow_cap，冰塔不能把它冻成不动靶子
 	factor = minf(factor, slow_cap)
-	slow_factor = maxf(minf(slow_factor, 1.0 - factor), 0.25)
+	# 直接减速的统一上限：多层减速之间是「取最强」，再套一层 50% 的硬顶。
+	# 霜环被强化卡顶到 55%、或者以后加更狠的减速塔时，玩家看到的上限始终是 50%。
+	factor = minf(factor, float(EnemyData.MAX_DIRECT_SLOW))
+	slow_factor = maxf(minf(slow_factor, 1.0 - factor), float(EnemyData.MIN_SPEED_MUL))
 	slow_timer = maxf(slow_timer, time)
 	_update_tint()
+
+
+## 当前的速度倍率（**不含** base_speed、也不含游泳系数）：
+## 塔层减速 × 地形减速 × 加速词条，合流之后兜一个全局下限 MIN_SPEED_MUL。
+## 单独抽成一个函数是因为地面 / 飞行两条移动分支原来各写一遍连乘，
+## 以后再加光环减速时很容易只改一处 —— 现在只有一个入口，下限也只会生效一次。
+func speed_mul() -> float:
+	var m := slow_factor * slow_extra * (1.0 + _haste)
+	return maxf(m, float(EnemyData.MIN_SPEED_MUL))
 
 
 ## 地形减速（震地雷的泥潭）：**乘算**叠在冰塔减速之上，互不覆盖。
