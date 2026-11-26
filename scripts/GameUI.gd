@@ -54,9 +54,11 @@ var god_kinds: Array = []              # Enemy.DATA 的键，顺序 = Kind 枚�
 var god_idx: int = 0                   # 当前选中的敌人类型（god_kinds 的下标）
 var god_count: int = 1                 # 一次放几只
 var god_hp: float = 1.0                # 血量倍率（叠在波次成长上）
-var god_type_btn: Button
-var god_count_btn: Button
-var god_hp_btn: Button
+var god_type_list: GridContainer       # 怪列表（每个按钮一种怪）
+var god_type_btns: Array = []          # 和 god_kinds 同下标
+var god_count_btns: Array = []
+var god_hp_btns: Array = []
+var god_crystal_btn: Button            # 水晶无敌开关（不扣生命）
 var _god_count_idx: int = 0
 var _god_hp_idx: int = 0
 
@@ -94,6 +96,13 @@ var _popup_key: String = ""
 
 const POPUP_SIZE := Vector2(226, 98)
 const POPUP_HEIGHT := 2.7             # 面板锚在塔顶上方多少世界单位
+
+# --- 上帝模式面板：怪列表的列数 / 数量与血量档位 ---
+const GOD_COLUMNS := 4
+const GOD_COUNTS := [1, 3, 5, 10]
+const GOD_HPS := [1.0, 3.0, 10.0]
+const GOD_PICK_COLOR := Color(1.0, 0.86, 0.45)     # 当前选中项的文字色
+const GOD_IDLE_COLOR := Color(0.88, 0.92, 1.0)
 
 # --- 布局常量：集中管理，改一处即可联动（避免魔法数字散落各处） ---
 const HUD_LEFT := 16
@@ -632,8 +641,10 @@ func _build_debug() -> void:
 
 
 ## 测试工具：上帝模式（右上角按钮 / F2）。
-## 面板挂在**顶部正中**而不是右上角按钮列下方 —— 按钮列到「地图切换」已经顶到 618，
-## 下面放不下一块面板了；中间顶部这块一直空着，也正好不挡左右两侧的信息栏。
+## 面板挂在**顶部正中**而不是右上角按钮列下方 —— 按钮列已经顶到屏幕底，放不下第二块；
+## 中间顶部这块一直空着，也正好不挡左右两侧的信息栏。
+## 怪的选项做成**列表**（而不是「点一下换一种」的循环按钮）：十几种怪循环一轮既费劲，
+## 也看不出到底有哪些。列表直接由 Enemy.DATA 生成，加新怪不用回来改这里。
 func _build_god() -> void:
 	btn_god = Button.new()
 	btn_god.text = "上帝模式 F2"
@@ -646,10 +657,10 @@ func _build_god() -> void:
 	god_root.anchor_right = 0.5
 	god_root.anchor_top = 0.0
 	god_root.anchor_bottom = 0.0
-	god_root.offset_left = -232
-	god_root.offset_right = 232
+	god_root.offset_left = -262
+	god_root.offset_right = 262
 	god_root.offset_top = 12
-	god_root.offset_bottom = 118
+	god_root.offset_bottom = 400        # 占位值，真实高度由 _fit_god_panel() 按内容算
 	god_root.visible = false
 	_style_panel(god_root)
 	ui_root.add_child(god_root)
@@ -659,52 +670,110 @@ func _build_god() -> void:
 	vb.add_theme_constant_override("separation", 6)
 	god_root.add_child(vb)
 
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 6)
-	vb.add_child(row)
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 8)
+	vb.add_child(head)
 
 	var title := Label.new()
-	title.text = "上帝模式"
+	title.text = "上帝模式 · 左键点地图放怪"
 	title.add_theme_color_override("font_color", Color(1.0, 0.86, 0.45))
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(title)
+	head.add_child(title)
 
-	god_type_btn = Button.new()
-	god_type_btn.custom_minimum_size = Vector2(118, 30)
-	god_type_btn.tooltip_text = "点一下换一种怪"
-	god_type_btn.pressed.connect(_on_god_type)
-	row.add_child(god_type_btn)
-
-	god_count_btn = Button.new()
-	god_count_btn.custom_minimum_size = Vector2(58, 30)
-	god_count_btn.tooltip_text = "一次放几只"
-	god_count_btn.pressed.connect(_on_god_count)
-	row.add_child(god_count_btn)
-
-	god_hp_btn = Button.new()
-	god_hp_btn.custom_minimum_size = Vector2(70, 30)
-	god_hp_btn.tooltip_text = "血量倍率（叠在当前波次的成长之上）"
-	god_hp_btn.pressed.connect(_on_god_hp)
-	row.add_child(god_hp_btn)
+	# 水晶无敌：开着的时候漏怪只记数、不扣生命 —— 压测后期波次时不用一直重开
+	god_crystal_btn = Button.new()
+	god_crystal_btn.text = "水晶无敌"
+	god_crystal_btn.toggle_mode = true
+	god_crystal_btn.custom_minimum_size = Vector2(96, 28)
+	god_crystal_btn.tooltip_text = "开着时：敌人漏进基地照常消失、照常记漏怪数，但不扣生命（换图 / 重开会自动关闭）"
+	god_crystal_btn.toggled.connect(_on_god_crystal_toggled)
+	head.add_child(god_crystal_btn)
 
 	var close := Button.new()
 	close.text = "关闭"
-	close.custom_minimum_size = Vector2(60, 30)
+	close.custom_minimum_size = Vector2(64, 28)
 	close.pressed.connect(_on_god_pressed)
-	row.add_child(close)
+	head.add_child(close)
+
+	# 怪列表：点哪个就是哪个，选中的那个高亮
+	god_type_list = GridContainer.new()
+	god_type_list.columns = GOD_COLUMNS
+	god_type_list.add_theme_constant_override("h_separation", 6)
+	god_type_list.add_theme_constant_override("v_separation", 4)
+	vb.add_child(god_type_list)
+
+	god_kinds.clear()
+	god_type_btns.clear()
+	for k in Enemy.DATA.keys():
+		var d: Dictionary = Enemy.DATA[k]
+		var i := god_kinds.size()
+		god_kinds.append(int(k))
+		var b := Button.new()
+		# 首领前面加星：列表里一眼能认出是哪几档强度
+		b.text = "%s%s" % ["★" if _god_is_boss(int(k)) else "", str(d.get("name", "?"))]
+		b.tooltip_text = "HP %.0f · 速度 %.2f\n%s" % [
+			float(d.get("hp", 0.0)), float(d.get("speed", 0.0)), str(d.get("desc", ""))]
+		b.custom_minimum_size = Vector2(0, 28)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.toggle_mode = true
+		b.pressed.connect(_on_god_type_pick.bind(i))
+		god_type_list.add_child(b)
+		god_type_btns.append(b)
+
+	god_count_btns.clear()
+	vb.add_child(_god_option_row("数量", GOD_COUNTS, _god_count_idx, god_count_btns, _on_god_count_pick))
+	god_hp_btns.clear()
+	vb.add_child(_god_option_row("血量", GOD_HPS, _god_hp_idx, god_hp_btns, _on_god_hp_pick))
 
 	var tip := Label.new()
-	tip.text = "左键点地图任意位置放怪（水面 / 岩石 / 路线外都行）；波间休整时刷的怪要等开波才会走"
+	# 这里**不能**用 AUTOWRAP：自动换行的 Label 在宽度还没确定时报出的最小高度
+	# 是「每个字一行」，会把面板撑到 1000+ 像素。手动分行，两行都短到放得下。
+	tip.text = "左键点地图放怪（水面 / 岩石 / 路线外都行）\n波间休整时刷的怪要等开波才会走"
 	tip.add_theme_color_override("font_color", Color(0.72, 0.78, 0.90))
-	# 面板宽度是固定像素，不换行的话这行字会直接溢出到地图上
-	tip.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	tip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vb.add_child(tip)
 
-	# 类型列表直接取 Enemy.DATA 的键：以后加新怪不用回来改这里
-	for k in Enemy.DATA.keys():
-		god_kinds.append(int(k))
+	_fit_god_panel()
 	_refresh_god_ui()
+
+
+## 面板高度按内容撑开：怪的种类一变行数就变，写死高度迟早对不上
+func _fit_god_panel() -> void:
+	if god_root == null or god_root.get_child_count() == 0:
+		return
+	var vb := god_root.get_child(0) as Control
+	if vb == null:
+		return
+	god_root.offset_bottom = god_root.offset_top + vb.get_combined_minimum_size().y + 16.0
+
+
+func _god_is_boss(k: int) -> bool:
+	return k == Enemy.Kind.BOSS or k == Enemy.Kind.MINI_BOSS \
+		or k == Enemy.Kind.SNOWKING or k == Enemy.Kind.PINELORD
+
+
+## 一行档位按钮（数量 / 血量）：每个按钮对应一个固定值，选中的高亮。
+## 和怪列表同一个理由 —— 轮换按钮看不出有哪几档、也看不出现在在第几档。
+func _god_option_row(label_text: String, opts: Array, cur: int, btns: Array, cb: Callable) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	var l := Label.new()
+	l.text = label_text
+	l.custom_minimum_size = Vector2(44, 0)
+	l.add_theme_color_override("font_color", Color(0.72, 0.78, 0.90))
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(l)
+	for i in range(opts.size()):
+		var b := Button.new()
+		b.text = "×%d" % int(opts[i])
+		b.custom_minimum_size = Vector2(58, 26)
+		b.toggle_mode = true
+		b.button_pressed = (i == cur)
+		b.pressed.connect(cb.bind(i))
+		row.add_child(b)
+		btns.append(b)
+	return row
 
 
 func _on_god_pressed() -> void:
@@ -715,6 +784,9 @@ func toggle_god() -> void:
 	if god_root == null:
 		return
 	god_root.visible = not god_root.visible
+	# 每次打开都重算一次高度：字体 / 行数变化时不用重启就对齐
+	if god_root.visible:
+		_fit_god_panel()
 	Sound.play("click")
 	if god_root.visible and main != null:
 		# 进上帝模式先把建造模式退掉：否则一次左键既要放怪又要建塔
@@ -732,35 +804,53 @@ func god_kind() -> int:
 	return int(god_kinds[clampi(god_idx, 0, god_kinds.size() - 1)])
 
 
-func _on_god_type() -> void:
-	if god_kinds.is_empty():
-		return
-	god_idx = (god_idx + 1) % god_kinds.size()
+func _on_god_type_pick(i: int) -> void:
+	Sound.play("click")
+	god_idx = clampi(i, 0, maxi(god_kinds.size() - 1, 0))
 	_refresh_god_ui()
 
 
-func _on_god_count() -> void:
-	var opts := [1, 3, 5, 10]
-	_god_count_idx = (_god_count_idx + 1) % opts.size()
-	god_count = int(opts[_god_count_idx])
+func _on_god_count_pick(i: int) -> void:
+	Sound.play("click")
+	_god_count_idx = clampi(i, 0, GOD_COUNTS.size() - 1)
+	god_count = int(GOD_COUNTS[_god_count_idx])
 	_refresh_god_ui()
 
 
-func _on_god_hp() -> void:
-	var opts := [1.0, 3.0, 10.0]
-	_god_hp_idx = (_god_hp_idx + 1) % opts.size()
-	god_hp = float(opts[_god_hp_idx])
+func _on_god_hp_pick(i: int) -> void:
+	Sound.play("click")
+	_god_hp_idx = clampi(i, 0, GOD_HPS.size() - 1)
+	god_hp = float(GOD_HPS[_god_hp_idx])
 	_refresh_god_ui()
 
 
+func _on_god_crystal_toggled(on: bool) -> void:
+	Sound.play("click")
+	GameState.crystal_invincible = on
+	_god_select(god_crystal_btn, on)
+	refresh()
+
+
+## 选中项高亮：按下底纹 + 文字色一起用 —— 默认主题的 pressed 底纹太淡，
+## 只看底纹几乎分辨不出当前选的是哪一种怪。
 func _refresh_god_ui() -> void:
-	if god_type_btn == null:
-		return
-	var k := god_kind()
-	var nm := str(Enemy.DATA[k].get("name", "?"))
-	god_type_btn.text = "怪：%s" % nm
-	god_count_btn.text = "×%d" % god_count
-	god_hp_btn.text = "血 ×%d" % int(god_hp)
+	for i in range(god_type_btns.size()):
+		_god_select(god_type_btns[i], i == god_idx)
+	if god_crystal_btn != null:
+		_god_select(god_crystal_btn, GameState.crystal_invincible)
+	for i in range(god_count_btns.size()):
+		_god_select(god_count_btns[i], i == _god_count_idx)
+	for i in range(god_hp_btns.size()):
+		_god_select(god_hp_btns[i], i == _god_hp_idx)
+
+
+func _god_select(b: Button, on: bool) -> void:
+	b.button_pressed = on
+	var col := GOD_PICK_COLOR if on else GOD_IDLE_COLOR
+	b.add_theme_color_override("font_color", col)
+	b.add_theme_color_override("font_pressed_color", col)
+	b.add_theme_color_override("font_hover_pressed_color", col)
+	b.add_theme_color_override("font_hover_color", Color(1.0, 0.95, 0.80))
 
 
 ## 开发用地图切换器（右上角按钮 / F1）：列出 MapDefs 里的所有地图，点一下重载场景过去。
@@ -957,7 +1047,7 @@ func _build_codex() -> void:
 		Enemy.Kind.GRUNT, Enemy.Kind.RUNNER, Enemy.Kind.TANK,
 		Enemy.Kind.SHIELD, Enemy.Kind.HEALER, Enemy.Kind.SPLITTER, Enemy.Kind.CLOAK,
 		Enemy.Kind.FROSTLING, Enemy.Kind.ICEBREAKER, Enemy.Kind.FROSTWEAVER,
-		Enemy.Kind.MINI_BOSS, Enemy.Kind.SNOWKING, Enemy.Kind.BOSS,
+		Enemy.Kind.MINI_BOSS, Enemy.Kind.PINELORD, Enemy.Kind.SNOWKING, Enemy.Kind.BOSS,
 	]
 	_codex_viewports.clear()
 	for k in kinds:
@@ -968,9 +1058,14 @@ func _build_codex() -> void:
 ## 没有对应 GLB 时：有原画精灵（enemy_<后缀>.png）就显示精灵，否则回退成色块。
 func _codex_preview(k: int, d: Dictionary) -> Control:
 	var model := ModelLib.instance_path("res://models/enemies/enemy_%s.glb" % _codex_suffix(k))
-	# 雪人王没有 GLB：图鉴里直接用场上的程序化 3D 造型，而不是贴一张立绘
-	if model == null and k == Enemy.Kind.SNOWKING:
-		model = SnowkingModel.build(1.0)
+	# 霜崽 / 雪人王没有 GLB：图鉴里直接用场上的程序化 3D 造型，而不是贴一张立绘
+	if model == null:
+		if k == Enemy.Kind.SNOWKING:
+			model = SnowkingModel.build(1.0)
+		elif k == Enemy.Kind.FROSTLING:
+			model = FrostlingModel.build(1.0)
+		elif k == Enemy.Kind.PINELORD:
+			model = PineBossModel.build(1.0)
 	if model == null:
 		var tex := TextureLib.get_texture("enemy_%s" % _codex_suffix(k))
 		if tex != null:
@@ -1072,6 +1167,8 @@ func _codex_suffix(k: int) -> String:
 			return "frostling"
 		Enemy.Kind.SNOWKING:
 			return "snowking"
+		Enemy.Kind.PINELORD:
+			return "pinelord"
 		_:
 			return "grunt"
 
@@ -1476,7 +1573,9 @@ func refresh() -> void:
 		lbl_wave.text = "%s无尽  波次 %d" % [map_short, GameState.wave]
 	else:
 		lbl_wave.text = "%s波次  %d / %d" % [map_short, GameState.wave, Waves.TOTAL]
-	lbl_lives.text = "生命  %d" % GameState.lives
+	# 水晶无敌时给个常驻标记：面板关掉以后也要一眼看出现在扣不扣血
+	lbl_lives.text = "生命  %d%s" % [
+		GameState.lives, "  ∞ 无敌" if GameState.crystal_invincible else ""]
 	lbl_gold.text = "金币  %d" % GameState.gold
 	lbl_best.text = "最高  %d 波" % GameState.best_wave
 

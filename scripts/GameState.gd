@@ -25,6 +25,10 @@ var best_wave: int = 0
 ## 换图 / 重开都会走 reset()，所以这个标记天然按「一局一张图」重置。
 var ice_opened: bool = false
 
+## 上帝模式：水晶无敌 —— 敌人漏进基地照常消失、照常记漏怪数，但不扣生命。
+## 开发用开关，由上帝模式面板控制；换图 / 重开走 reset() 自动关掉。
+var crystal_invincible: bool = false
+
 ## 跨地图继承：进入下一张地图前由 Main 写入，reset() 消费一次后清空（-1 = 不继承）。
 ## 只带金币 / 生命 —— 塔和卡牌 buff 不继承，新地图从零布防。
 var carry_gold: int = -1
@@ -67,6 +71,7 @@ func reset() -> void:
 	total_kills = 0
 	total_leaks = 0
 	ice_opened = false
+	crystal_invincible = false
 	buffs = {
 		"damage": 1.0,
 		"range": 1.0,
@@ -109,6 +114,10 @@ func spend(v: int) -> bool:
 
 
 func lose_life(v: int = 1) -> void:
+	# 上帝模式：水晶无敌。漏怪照样消失、照样计入漏怪数（on_leak 在 Enemy._leak 里先调），
+	# 只是不扣生命 —— 于是 game_over 永远触发不了，可以放心压测后期波次。
+	if crystal_invincible:
+		return
 	lives = max(lives - v, 0)
 	lives_changed.emit(lives)
 	if lives <= 0:

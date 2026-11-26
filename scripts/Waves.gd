@@ -47,6 +47,13 @@ static func interval(wave: int) -> float:
 	return maxf(0.80 - 0.045 * float(wave - 1), 0.32)
 
 
+## 「入口驻守」时长：这一波出怪总时长的一半（plan_size 含首领自己那一只）。
+## 霜渊的雪人王开波就登场、蹲在入口滚雪球，等到这一波出一半才动身往里走 ——
+## 所以它滚的球里装的正是这半波刚从洞口出来的杂兵，而不是已经在半路上的漏网之鱼。
+static func entrance_hold(wave: int, plan_size: int) -> float:
+	return 0.5 * float(maxi(plan_size, 1)) * interval(wave)
+
+
 ## 该波是不是压轴大首领波（最后一波，以及无尽模式每 10 波）
 static func is_big_boss_wave(wave: int) -> bool:
 	return wave == TOTAL or (wave > 0 and wave % 10 == 0)
@@ -62,12 +69,17 @@ static func big_boss_kind(opts: Dictionary = {}) -> int:
 	return int(opts.get("big_boss", Enemy.Kind.BOSS))
 
 
+## 本图的小首领：默认「小首领」，地图可以换成自己的（例如霜渊的霜松）
+static func mini_boss_kind(opts: Dictionary = {}) -> int:
+	return int(opts.get("mini_boss", Enemy.Kind.MINI_BOSS))
+
+
 ## 下一波的首领名字；没有首领返回空串。给「开始第 N 波」按钮做战前预告用。
 static func boss_name(wave: int, opts: Dictionary = {}) -> String:
 	if is_big_boss_wave(wave):
 		return str(Enemy.DATA[big_boss_kind(opts)]["name"])
 	if is_mini_boss_wave(wave):
-		return str(Enemy.DATA[Enemy.Kind.MINI_BOSS]["name"])
+		return str(Enemy.DATA[mini_boss_kind(opts)]["name"])
 	return ""
 
 
@@ -88,6 +100,7 @@ static func plan(wave: int, opts: Dictionary = {}) -> Array:
 	var weaver := bool(opts.get("frostweaver", false))
 	var frostling := bool(opts.get("frostling", false))
 	var boss_kind := big_boss_kind(opts)
+	var mini_kind := mini_boss_kind(opts)
 
 	for i in range(6 + n * 2):
 		list.append(Enemy.Kind.GRUNT)
@@ -125,16 +138,21 @@ static func plan(wave: int, opts: Dictionary = {}) -> Array:
 
 	if is_big_boss_wave(n):
 		# 最后一波（以及无尽模式每 10 波）：重甲开路 + 1 个小首领护卫 + 压轴首领
-		# 压轴首领按地图换（霜渊是雪人王），没配置就是原来的大首领
+		# 大小首领都按地图换（霜渊是霜松 + 雪人王），没配置就是原来的通用首领
 		for i in range(clampi(n - 3, 2, 8)):
 			list.append(Enemy.Kind.TANK)
-		list.append(Enemy.Kind.MINI_BOSS)
-		list.append(boss_kind)
+		list.append(mini_kind)
+		# 会「入口驻守」的首领（霜渊的雪人王）**第一个登场**：它蹲在洞口滚雪球，
+		# 等这波出一半才动身；标记是写在 EnemyData 里的，别的图想这么玩也只需要打标记。
+		if bool(Enemy.DATA[boss_kind].get("entrance_wait", false)):
+			list.push_front(boss_kind)
+		else:
+			list.append(boss_kind)
 	elif is_mini_boss_wave(n):
-		# 每 5 波：重甲开路 + 小首领
+		# 每 5 波：重甲开路 + 小首领（霜渊是霜松）
 		for i in range(clampi(n - 3, 2, 8)):
 			list.append(Enemy.Kind.TANK)
-		list.append(Enemy.Kind.MINI_BOSS)
+		list.append(mini_kind)
 
 	return list
 

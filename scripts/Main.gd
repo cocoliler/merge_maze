@@ -19,6 +19,13 @@ var _left_press_pos := Vector2.ZERO
 ## 金币直接失去意义（也正是「后期不缺钱」的主要来源之一）。
 const INTEREST_CAP := 150
 
+## 同屏敌人软上限：无尽模式后期一波就是几百只，同屏数量失控时单帧时间会明显上升
+## （每只怪都要走 _process，每座塔每帧都要遍历全场敌人）。
+## 超过上限只是**延迟出怪**，波次阵容完全不变，玩家的压力也不会凭空变大 ——
+## 这是「长时间挂机越玩越卡」的兜底阀，而不是重做数值。
+const MAX_LIVE_ENEMIES := 140
+const SPAWN_RETRY := 0.25           # 场上满了以后多久再试一次
+
 const CAM_MIN_H := 9.0
 const CAM_MAX_H := 48.0
 const CAM_BACK_RATIO := 18.0 / 21.0
@@ -817,16 +824,24 @@ func _spawn_next() -> void:
 		if not route.is_empty() and int(route.get("from", -1)) >= 0:
 			cells = route["cells"]
 			swim = Vector2i(int(route["from"]), int(route["to"]))
+	# 会「入口驻守」的首领（雪人王）由 Waves.plan 排到第一只：
+	# 它一开波就在洞口蹲着，蹲满这一波出怪时长的一半才动身。
+	var hold := 0.0
+	if bool(Enemy.DATA[k].get("entrance_wait", false)):
+		hold = Waves.entrance_hold(GameState.wave, spawn_queue.size() + 1)
 	var e := Enemy.new()
 	enemies_root.add_child(e)
 	e.spawn(k, grid.spawn_world_for(c), grid.cells_to_world(cells),
-		Waves.hp_scale(GameState.wave), GameState.wave, swim)
+		Waves.hp_scale(GameState.wave), GameState.wave, swim, hold)
 	# 首领登场：信息面板闪现提示，玩家不会漏看
 	if k == Enemy.Kind.BOSS:
 		_flash_info("大首领出现了！会放压制脉冲让周围塔熄火，半血后狂暴并召唤援军 —— 别把防线堆在它身边")
 		Sound.play("wave")
 	elif k == Enemy.Kind.MINI_BOSS:
 		_flash_info("小首领出现了！战吼会给周围小怪加速，半血召唤援军 —— 先集火它")
+		Sound.play("wave")
+	elif k == Enemy.Kind.SNOWKING:
+		_flash_info("雪人王堵在入口滚雪球了！它把这波刚出门的杂兵卷进球里往前送，自己蹲到这一波出一半才动身 —— 别让它把整波都送过防线")
 		Sound.play("wave")
 	elif k == Enemy.Kind.ICEBREAKER and _ice_hint_wave != GameState.wave:
 		# 每波只提示第一次，不然一次来 4 只会把信息面板刷屏
@@ -858,6 +873,9 @@ func _wave_opts() -> Dictionary:
 	# 本图的压轴首领：霜渊是雪人王（丢雪球压塔攻速），没配置就还是通用大首领
 	if bool(md.get("snowking", false)):
 		opts["big_boss"] = Enemy.Kind.SNOWKING
+	# 本图的小首领：霜渊是霜松（第 5 波与无尽每 5 波），没配置就还是通用小首领
+	if bool(md.get("pineboss", false)):
+		opts["mini_boss"] = Enemy.Kind.PINELORD
 	return opts
 
 
@@ -1109,8 +1127,12 @@ func _process(delta: float) -> void:
 		if spawn_queue.size() > 0:
 			spawn_timer -= delta
 			if spawn_timer <= 0.0:
-				_spawn_next()
-				spawn_timer = Waves.interval(GameState.wave)
+				if get_tree().get_nodes_in_group("enemies").size() >= MAX_LIVE_ENEMIES:
+					# 场上已经堆满：先不出新怪，队列原样留着，等场上消化掉再继续
+					spawn_timer = SPAWN_RETRY
+				else:
+					_spawn_next()
+					spawn_timer = Waves.interval(GameState.wave)
 		else:
 			if get_tree().get_nodes_in_group("enemies").size() == 0:
 				_end_wave()

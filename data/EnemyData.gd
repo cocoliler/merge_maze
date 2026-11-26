@@ -2,7 +2,7 @@ class_name EnemyData
 ## 敌人数值配置（外置数据文件）。调整血量/速度/奖励/颜色/描述只改这里。
 ## 注意：Kind 枚举顺序需与 Enemy.gd 中的 enum 保持完全一致。
 
-enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS, ICEBREAKER, FROSTWEAVER, FROSTLING, SNOWKING }
+enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS, ICEBREAKER, FROSTWEAVER, FROSTLING, SNOWKING, PINELORD }
 
 ## ---------------------------------------------------------------- 首领专属技能
 ## 技能逻辑在 Enemy._tick_boss_skill() 里，这里只管数值 —— 想调强度只改下面这些常量。
@@ -20,6 +20,8 @@ const SUMMON_HP_RATIO := 0.5
 const SUMMON_HP_COEF := 0.6
 const MINI_BOSS_SUMMON := 2
 const BOSS_SUMMON := 3
+## 霜松「扎根」召唤的霜崽数量（冰原主题：叫来的不是小兵，是跟着它混的霜崽）
+const PINE_SUMMON := 2
 
 ## 大首领「终焉之影」· 压制脉冲：每 BOSS_PULSE_INTERVAL 秒，让半径内的塔停火
 ## BOSS_PULSE_TIME 秒（塔本身不会被摧毁，只是暂时熄火）。
@@ -42,6 +44,22 @@ const SNOWBALL_ENRAGE_COEF := 0.6
 const SNOWBALL_SPEED := 9.0
 const SNOWBALL_ARC := 1.3
 const SNOWBALL_SUMMON := 2
+
+## 雪人王「滚雪球」：把附近的小杂兵卷进球里，滚到一定体量后向前滚一段再炸开。
+## 被卷的怪全程**无敌 / 不可锁定 / 不移动**，滚完从球里散出来 —— 等于被雪人王白送了一段路。
+## 只卷普通小怪：首领、飞行怪、碎冰者都不卷（碎冰者游泳状态被卷会打断水陆切换）。
+const ROLL_FIRST_DELAY := 7.0     # 首次技能延迟（登场先走一小段）
+const ROLL_INTERVAL := 16.0        # 冷却（半血后 ×ROLL_ENRAGE_COEF）
+const ROLL_RADIUS := 8.0           # 吸附半径（约 4 格，比之前大一圈才好一次卷满）
+const ROLL_MAX_GUESTS := 3         # 最多卷几只
+const ROLL_GATHER_TIME := 1.2      # 聚球最长时长
+const ROLL_ABSORB_TICK := 0.25     # 每隔多久吸一只
+const ROLL_POINTS := 5             # 向前滚几个路点后炸开
+const ROLL_MAX_PATH_RATIO := 0.5   # 路程过半后技能封存：后半程再送怪等于直接送到基地门口
+const ROLL_SPEED := 7.0            # 滚动速度（世界单位 / 秒）
+const ROLL_BASE_RADIUS := 0.50     # 空球半径
+const ROLL_RADIUS_STEP := 0.18     # 每卷一只球变大多少
+const ROLL_ENRAGE_COEF := 0.6      # 半血「暴雪」后冷却缩短
 
 ## ---------------------------------------------------------------- 霜语者的冰甲
 ## 每 ICE_ARMOR_INTERVAL 秒，给 ICE_ARMOR_RADIUS 内的同伴套一层吸收伤害的护盾。
@@ -75,7 +93,7 @@ const DATA := {
 	Kind.ICEBREAKER: {"name": "碎冰者", "hp": 320.0, "speed": 1.25, "reward": 26, "color": Color(0.21, 0.37, 0.56), "size": 2.00, "flying": false, "armor": 0.15, "heal": 0.0, "split": 0, "cloak": false, "icebreak": true, "desc": "砸开冰面横穿冻湖的巨魔：冰面上不能建塔，湖对岸的火力拦不住它，得靠湖边的塔在它上岸时集火"},
 	# 冰原专属辅助：自己不打人，只负责给同伴套冰甲。先杀它，或者用喷火塔拆甲。
 	Kind.FROSTWEAVER: {"name": "霜语者", "hp": 150.0, "speed": 1.50, "reward": 22, "color": Color(0.46, 0.86, 0.80), "size": 1.55, "flying": false, "armor": 0.0, "heal": 0.0, "split": 0, "cloak": false, "iceshield": true, "desc": "给周围同伴套冰甲的萨满：冰甲按目标最大生命吸收伤害，火属性打上去破得快 2.6 倍 —— 喷火塔拆甲、其余塔补刀"},
-	# 冰原小怪：外形走贴图精灵（textures/enemy_frostling.png）。
+	# 冰原小怪：外形是程序化 3D 造型（scripts/FrostlingModel.gd），原画只作设计参考。
 	# underwater = 能走水下段，但**自己砸不开冰面** —— 要等碎冰者先把湖凿穿，
 	# 它才跟着冰洞游过去；冰面没通时老老实实沿雪径绕湖。
 	Kind.FROSTLING: {"name": "霜崽", "hp": 52.0, "speed": 2.90, "reward": 11, "color": Color(1.0, 1.0, 1.0), "size": 1.05, "flying": false, "armor": 0.0, "heal": 0.0, "split": 0, "cloak": false, "underwater": true, "desc": "冰原小怪：体型小、跑得快；碎冰者凿穿冰面后，它会跟着从冰洞底下游过去抄近路"},
@@ -83,5 +101,9 @@ const DATA := {
 	# 不是原画精灵：造型刻意改造过（冰晶王冠 / 六棱冰甲 / 胸口冰核 / 单手蓄力雪球），别再把原画贴上去。
 	# 和「大首领」的区别：它不砸塔、不脉冲熄火，而是**往炮塔丢雪球压攻速** ——
 	# 塔不会被拆，但被砸中的那几秒输出会明显变慢，逼玩家把塔散开摆、别全挤在湖岸。
-	Kind.SNOWKING: {"name": "雪人王", "hp": 1700.0, "speed": 0.95, "reward": 240, "color": Color(0.90, 0.94, 1.0), "size": 2.90, "flying": false, "armor": 0.15, "heal": 0.0, "split": 0, "cloak": false, "slow_cap": 0.4, "snowball": true, "desc": "霜渊的压轴首领：血量高、护甲减免 15%。技能①雪球：每 6 秒朝射程内的一座塔扔雪球，命中后那座塔攻速 −35%、持续 5 秒（塔不会被摧毁）；技能②暴雪：半血后雪球间隔缩短到 60%，并召唤 2 只霜崽"},
+	Kind.SNOWKING: {"name": "雪人王", "hp": 1700.0, "speed": 0.95, "reward": 240, "color": Color(0.90, 0.94, 1.0), "size": 2.90, "flying": false, "armor": 0.15, "heal": 0.0, "split": 0, "cloak": false, "slow_cap": 0.4, "snowball": true, "entrance_wait": true, "desc": "霜渊的压轴首领：血量高、护甲减免 15%。它一开波就堵在入口，把这波刚出门的杂兵卷成雪球往前送，等这一波出到一半才动身往里走（不会一直蹲到最后）。技能①雪球：每 6 秒朝射程内的一座塔扔雪球，命中后那座塔攻速 −35%、持续 5 秒（塔不会被摧毁）；技能②暴雪：半血后雪球间隔缩短到 60%，并召唤 2 只霜崽；技能③滚雪球：每 16 秒把半径约 4 格内至多 3 只杂兵卷成雪球，向前滚 5 格后炸开 —— 被卷的怪全程无敌，等于被它白送一段路（它自己走过一半路程后就不再滚了）"},
+	# 第二张图的第 5 波小首领（无尽每 5 波）。外观是程序化 3D 造型（scripts/PineBossModel.gd）：
+	# 一棵会走路的霜松 —— 三层树冠 + 树枝手臂 + 树根脚 + 树顶冰晶。
+	# 技能沿用「小首领」的战吼，但半血「扎根」召唤的是霜崽（冰原杂兵）。
+	Kind.PINELORD: {"name": "霜松", "hp": 680.0, "speed": 1.30, "reward": 85, "color": Color(0.20, 0.52, 0.34), "size": 2.35, "flying": false, "armor": 0.10, "heal": 0.0, "split": 0, "cloak": false, "slow_cap": 0.55, "desc": "霜渊的小首领：一棵会走路的霜松，护甲减免 10%。技能①战吼：每 8 秒给周围小怪 +30% 移速 3 秒；技能②扎根：半血时召唤 2 只霜崽"},
 }

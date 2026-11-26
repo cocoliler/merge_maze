@@ -36,9 +36,8 @@ const SLOTS := [
 	"fx_frost_fog",
 	"enemy_grunt", "enemy_runner", "enemy_tank", "enemy_boss",
 	"enemy_flyer", "enemy_shield",
-	# 霜崽：原画精灵（billboard 方片，带透明通道），见 Enemy._build_sprite_body()
-	# 雪人王不走贴图：它是程序化 3D 造型（scripts/SnowkingModel.gd）
-	"enemy_frostling",
+	# 原画精灵槽位已停用：霜崽 / 雪人王都改成程序化 3D 造型
+	# （scripts/FrostlingModel.gd / scripts/SnowkingModel.gd），enemy_*.png 仅作设计参考。
 ]
 
 static var _index := {}        # 小写槽位名 -> 完整路径

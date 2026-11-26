@@ -3,7 +3,7 @@ class_name Enemy
 ## 敌人：沿 GameGrid 生成的固定路线行进，支持减速、血条、漏怪扣血。
 ## 固定路线下建塔不会改变行进路径，所以战斗中不再重算；repath() 仅作兜底保留。
 
-enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS, ICEBREAKER, FROSTWEAVER, FROSTLING, SNOWKING }
+enum Kind { GRUNT, RUNNER, TANK, BOSS, FLYER, SHIELD, HEALER, SPLITTER, CLOAK, MINI_BOSS, ICEBREAKER, FROSTWEAVER, FROSTLING, SNOWKING, PINELORD }
 
 const DATA := EnemyData.DATA
 
@@ -154,6 +154,12 @@ var _body: Node3D
 var _bar_root: Node3D
 var _bar_mat: ShaderMaterial
 var _mat: StandardMaterial3D
+
+## 血条 / 冰甲外壳的 Shader：**全工程共用一份**（材质仍然是每只怪一个，各自带自己的 ratio）。
+## 以前是每刷一只怪就 `Shader.new()` 一次：挂机打上几千只怪，就会攒下几千个 Shader 资源，
+## 渲染端每个都要建一份管线/参数对象，内存一路涨 —— 这是「玩久了越来越卡」的主要来源之一。
+static var _bar_shader: Shader
+static var _shield_shader: Shader
 ## 状态染色回落到哪个底色：程序化敌人是 DATA 里的 color，贴图精灵是白色（= 不改变原画）
 var _tint_base: Color = Color.WHITE
 var _cam: Camera3D
@@ -163,18 +169,39 @@ var _marker_gem: MeshInstance3D # 标记里旋转的宝石
 var _marker_base_y: float = 0.0
 var _marker_t: float = 0.0
 
+## 被雪人王的「滚雪球」卷进去：整只怪收进球里 —— 无敌、不可锁定、不移动。
+var _rolled: bool = false
+
+## 雪人王「滚雪球」状态机：0 = 空闲（走冷却），1 = 聚球（吸附附近的怪），2 = 滚动。
+var _roll_state: int = 0
+var _roll_timer: float = 0.0
+var _roll_gather: float = 0.0
+var _roll_absorb_t: float = 0.0
+var _roll_radius: float = 0.5
+var _roll_ball: Node3D
+var _roll_mesh: MeshInstance3D
+var _roll_guests: Array = []          # 被卷进球的敌人（释放时逐个放出来）
+var _roll_wp: Array[Vector3] = []     # 雪球要滚过的路点
+var _roll_idx: int = 0
+var _roll_locked: bool = false        # 路程过半后封存技能：一旦判定就永久失效，不再每帧重试
+
+## 入口驻守：雪人王开波就登场，蹲在洞口不走，等这一波出一半才动身。
+## 时长由 Main 按本波长度算好传进来（Waves.entrance_hold），Enemy 自己不猜波次信息。
+var _hold_timer: float = 0.0
+var _hold_t: float = 0.0
+
 # ---------------------------------------------------------------- 生成
 
 ## swim：碎冰者的「水面段」在 cells 里的首尾下标（Vector2i(-1,-1) = 全程不下水）。
 ## 传 cells 下标而不是 path_world 下标，是因为调用方本来就是按格子算的；
 ## 这里统一 +1 换成 path_world 下标（[0] 是出生点）。
 func spawn(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scale: float, wave: int,
-		swim: Vector2i = Vector2i(-1, -1)) -> void:
-	_init_enemy(k, start_pos, world_path, hp_scale, wave, -1, swim)
+		swim: Vector2i = Vector2i(-1, -1), hold: float = 0.0) -> void:
+	_init_enemy(k, start_pos, world_path, hp_scale, wave, -1, swim, hold)
 
 
 func _init_enemy(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scale: float, wave: int,
-		reward_override: int, swim: Vector2i = Vector2i(-1, -1)) -> void:
+		reward_override: int, swim: Vector2i = Vector2i(-1, -1), hold: float = 0.0) -> void:
 	kind = k
 	var d: Dictionary = DATA[k]
 	max_hp = float(d["hp"]) * hp_scale
@@ -202,6 +229,19 @@ func _init_enemy(k: int, start_pos: Vector3, world_path: Array[Vector3], hp_scal
 	_enraged = false
 	_summoned = false
 	_skill_timer = _first_skill_delay()
+	# 雪人王的第三个技能：登场 7 秒后开始滚第一次雪球
+	_rolled = false
+	_roll_state = 0
+	_roll_gather = 0.0
+	_roll_absorb_t = 0.0
+	_roll_guests.clear()
+	_roll_wp.clear()
+	_roll_idx = 0
+	_roll_locked = false
+	_roll_timer = float(EnemyData.ROLL_FIRST_DELAY) if k == Kind.SNOWKING else 0.0
+	# 入口驻守（只有被 Main 指定了时长才会 > 0，上帝模式刷出来的照常走）
+	_hold_timer = maxf(hold, 0.0)
+	_hold_t = 0.0
 	_cloaked = false
 	_cloak_timer = 0.0
 	_dot_dps = 0.0
@@ -304,14 +344,15 @@ func _apply_elites() -> void:
 ## 大首领靠压制脉冲打断防线、半血狂暴决定战斗的后半段节奏。
 ## 数值全在 EnemyData 里，这里只负责表现与结算。
 
-## 首领是「有技能的那三只」：小首领（战吼 / 集结）、大首领（脉冲 / 狂暴）、雪人王（雪球 / 暴雪）
+## 首领是「有技能的那几只」：小首领（战吼 / 集结）、霜松（战吼 / 扎根）、大首领（脉冲 / 狂暴）、
+## 雪人王（雪球 / 暴雪）
 func is_boss() -> bool:
-	return kind == Kind.BOSS or kind == Kind.MINI_BOSS or kind == Kind.SNOWKING
+	return kind == Kind.BOSS or kind == Kind.MINI_BOSS or kind == Kind.SNOWKING or kind == Kind.PINELORD
 
 
 ## 第一次放技能的延迟：首领登场先走一小段，给玩家一点反应时间
 func _first_skill_delay() -> float:
-	if kind == Kind.MINI_BOSS:
+	if kind == Kind.MINI_BOSS or kind == Kind.PINELORD:
 		return float(EnemyData.WARCRY_INTERVAL) * 0.6
 	if kind == Kind.BOSS:
 		return float(EnemyData.BOSS_PULSE_INTERVAL) * 0.5
@@ -343,7 +384,7 @@ func _tick_boss_skill(delta: float) -> void:
 	_skill_timer -= delta
 	if _skill_timer > 0.0:
 		return
-	if kind == Kind.MINI_BOSS:
+	if kind == Kind.MINI_BOSS or kind == Kind.PINELORD:
 		_skill_timer = float(EnemyData.WARCRY_INTERVAL)
 		_warcry()
 	elif kind == Kind.SNOWKING:
@@ -394,6 +435,232 @@ func _throw_snowball() -> void:
 	parent.add_child(ball)
 	ball.launch(best, global_position + Vector3(0.0, _body_h * 0.75, 0.0),
 		float(EnemyData.SNOWBALL_SLOW), float(EnemyData.SNOWBALL_TIME))
+
+
+## 雪人王「滚雪球」：每 ROLL_INTERVAL 秒把 ROLL_RADIUS 内至多 3 只杂兵卷进球里，
+## 向前滚 ROLL_POINTS 个路点后炸开。被卷的怪全程**无敌、不可锁定、不移动**，
+## 滚完从球里散出来 —— 等于被雪人王白送了一段路。
+## 为什么是「送兵」而不是伤害：它已经有「砸塔降攻速」的压制，
+## 再来一条纯伤害技能只是数值；滚雪球改变的是**漏怪压力** ——
+## 玩家得在它把杂兵卷起来之前先清场，否则一群怪会突然出现在防线更前面。
+## 但它自己走过 ROLL_MAX_PATH_RATIO（一半路程）后就封存技能：这时候再送，
+## 怪会直接落在基地门口，变成「看不见的漏怪」，玩家再清场也来不及。
+func _tick_roll(delta: float) -> void:
+	if _roll_state == 0:
+		if _roll_locked:
+			return
+		_roll_timer -= delta
+		if _roll_timer <= 0.0:
+			if not _can_roll_here():
+				_roll_locked = true
+				return
+			_start_gather()
+		return
+	if _roll_state == 1:
+		_roll_gather -= delta
+		_roll_absorb_t += delta
+		# 聚球阶段：球悬在雪人王胸前，边吸边变大
+		if _roll_ball != null and is_instance_valid(_roll_ball):
+			var fwd := _body.global_transform.basis.z
+			fwd.y = 0.0
+			if fwd.length() > 0.0001:
+				fwd = fwd.normalized()
+			_roll_ball.global_position = global_position + Vector3(0.0, _body_h * 0.62, 0.0) + fwd * 1.15
+		if _roll_absorb_t >= float(EnemyData.ROLL_ABSORB_TICK):
+			_roll_absorb_t = 0.0
+			_absorb_one()
+		if _roll_guests.size() >= int(EnemyData.ROLL_MAX_GUESTS) or _roll_gather <= 0.0:
+			if _roll_guests.is_empty():
+				_cancel_roll()
+			else:
+				_begin_roll()
+		return
+	if _roll_state == 2:
+		_roll_move(delta)
+
+
+## 只有前半程能滚雪球：它已经走过 ROLL_MAX_PATH_RATIO 之后，球会把怪直接送到基地门口。
+## 用路点下标比值算路程：path_world 每个路点就是一格，横向偏移是给整条路径统一加的，
+## 不会改变各段长度的比例，所以下标比值就等于路程比值。
+func _can_roll_here() -> bool:
+	if path_world.size() < 3:
+		return false
+	var ratio := float(path_idx) / float(maxi(path_world.size() - 1, 1))
+	return ratio <= float(EnemyData.ROLL_MAX_PATH_RATIO)
+
+
+func _start_gather() -> void:
+	if _roll_state != 0 or _dying or _roll_locked:
+		return
+	if not _can_roll_here():
+		_roll_locked = true
+		return
+	_roll_state = 1
+	_roll_gather = float(EnemyData.ROLL_GATHER_TIME)
+	_roll_absorb_t = float(EnemyData.ROLL_ABSORB_TICK)   # 第一只立刻吸，不用再等 0.25 秒
+	_roll_guests.clear()
+	_roll_radius = float(EnemyData.ROLL_BASE_RADIUS)
+	if _roll_ball == null or not is_instance_valid(_roll_ball):
+		_build_roll_ball()
+	_apply_roll_size()
+	Fx.ring(get_parent(), global_position, Color(0.72, 0.90, 1.0), float(EnemyData.ROLL_RADIUS) * 0.6, 0.4)
+
+
+## 吸一只附近最近的杂兵。首领 / 飞行 / 碎冰者都不卷：
+## 碎冰者的水陆状态由 path 决定，被卷走再放出来会打断「沉下去游泳」的表演。
+func _absorb_one() -> void:
+	if _roll_guests.size() >= int(EnemyData.ROLL_MAX_GUESTS):
+		return
+	var radius := float(EnemyData.ROLL_RADIUS)
+	var best = null
+	var best_d := INF
+	for e in get_tree().get_nodes_in_group("enemies"):
+		if e == null or not is_instance_valid(e) or e == self:
+			continue
+		if e._rolled or e.is_boss() or e.flying or e.icebreak:
+			continue
+		if e.hp <= 0.0:
+			continue
+		var d: float = e.global_position.distance_to(global_position)
+		if d > radius or d >= best_d:
+			continue
+		best_d = d
+		best = e
+	if best == null:
+		return
+	best.become_rolled()
+	_roll_guests.append(best)
+	_apply_roll_size()
+	Fx.flash(get_parent(), global_position + Vector3(0.0, _body_h * 0.6, 0.0), Color(0.80, 0.95, 1.0), 0.9, 0.22)
+
+
+func _apply_roll_size() -> void:
+	_roll_radius = float(EnemyData.ROLL_BASE_RADIUS) + float(EnemyData.ROLL_RADIUS_STEP) * float(_roll_guests.size())
+	if _roll_mesh != null and is_instance_valid(_roll_mesh):
+		_roll_mesh.scale = Vector3.ONE * _roll_radius
+
+
+## 球够大了：落到地面，沿雪人王剩下的路点向前滚 ROLL_POINTS 个。
+## 终点卡在倒数第二个路点：直接把怪送到基地等于「免费漏怪」，惩罚太重。
+func _begin_roll() -> void:
+	if path_world.size() < 2 or path_idx >= path_world.size() - 2:
+		_cancel_roll()
+		return
+	_roll_state = 2
+	_roll_idx = 0
+	_roll_wp.clear()
+	# 从「球前面最近的路点」起滚，而不是死用 path_idx：球悬在雪人王胸前时已经越过当前
+	# 路点一格多了，直接从 path_idx 开始会让球先往回滚一小段 —— 入口驻守时看得特别明显。
+	# 只在 path_idx..path_idx+2 里找，避免路线拐弯时把球吸到远处另一段路上。
+	var from := path_idx
+	if _roll_ball != null and is_instance_valid(_roll_ball):
+		var probe := _roll_ball.global_position
+		probe.y = 0.0
+		var best := INF
+		for j in range(path_idx, mini(path_idx + 2, path_world.size() - 1) + 1):
+			var d := path_world[j].distance_squared_to(probe)
+			if d < best:
+				best = d
+				from = j
+	var last := mini(from + int(EnemyData.ROLL_POINTS), path_world.size() - 2)
+	for j in range(from, last + 1):
+		_roll_wp.append(path_world[j])
+	if _roll_wp.is_empty() or _roll_ball == null or not is_instance_valid(_roll_ball):
+		_release_roll()
+		return
+	var p := _roll_ball.global_position
+	p.y = _roll_radius
+	_roll_ball.global_position = p
+	Sound.play("hit", -8.0)
+
+
+func _roll_move(delta: float) -> void:
+	if _roll_ball == null or not is_instance_valid(_roll_ball):
+		_release_roll()
+		return
+	if _roll_idx >= _roll_wp.size():
+		_release_roll()
+		return
+	var dest: Vector3 = _roll_wp[_roll_idx]
+	dest.y = _roll_radius
+	var dir := dest - _roll_ball.global_position
+	dir.y = 0.0
+	var step := float(EnemyData.ROLL_SPEED) * delta
+	if dir.length() <= step:
+		_roll_ball.global_position = dest
+		_roll_idx += 1
+		if _roll_idx >= _roll_wp.size():
+			_release_roll()
+			return
+	else:
+		_roll_ball.global_position += dir.normalized() * step
+	# 滚动的视觉：球体绕自身 X 轴转，转速跟着线速度
+	if _roll_mesh != null and is_instance_valid(_roll_mesh):
+		_roll_mesh.rotation.x -= step / maxf(_roll_radius, 0.1)
+
+
+func _build_roll_ball() -> void:
+	var parent := get_parent()
+	if parent == null:
+		return
+	_roll_ball = Node3D.new()
+	_roll_ball.name = "RollSnowball"
+	parent.add_child(_roll_ball)
+	var mi := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 1.0
+	sm.height = 2.0
+	sm.radial_segments = 18
+	sm.rings = 10
+	mi.mesh = sm
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.92, 0.96, 1.0)
+	mat.roughness = 0.55
+	mat.emission_enabled = true
+	mat.emission = Color(0.55, 0.85, 1.0)
+	mat.emission_energy_multiplier = 0.35
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_roll_ball.add_child(mi)
+	_roll_mesh = mi
+
+
+## 一只怪都没吸到：球直接散掉，不进入滚动，短冷却后重试
+func _cancel_roll() -> void:
+	if _roll_ball != null and is_instance_valid(_roll_ball):
+		_roll_ball.queue_free()
+	_roll_ball = null
+	_roll_mesh = null
+	_roll_guests.clear()
+	_roll_state = 0
+	_roll_timer = 5.0
+
+
+## 球炸开：被卷的怪散在落点，恢复普通状态继续走
+func _release_roll() -> void:
+	var pos := global_position
+	if _roll_ball != null and is_instance_valid(_roll_ball):
+		pos = _roll_ball.global_position
+	var n := _roll_guests.size()
+	for i in range(n):
+		var e = _roll_guests[i]
+		if e == null or not is_instance_valid(e):
+			continue
+		var ang := TAU * float(i) / maxf(1.0, float(n))
+		e.release_rolled(pos + Vector3(cos(ang), 0.0, sin(ang)) * 0.55)
+	var parent := get_parent()
+	if parent != null:
+		Fx.flash(parent, pos, Color(0.85, 0.96, 1.0), 1.8, 0.4)
+		Fx.ring(parent, pos, Color(0.75, 0.92, 1.0), 2.2, 0.5)
+	if _roll_ball != null and is_instance_valid(_roll_ball):
+		_roll_ball.queue_free()
+	_roll_ball = null
+	_roll_mesh = null
+	_roll_guests.clear()
+	_roll_state = 0
+	var coef := float(EnemyData.ROLL_ENRAGE_COEF) if _enraged else 1.0
+	_roll_timer = float(EnemyData.ROLL_INTERVAL) * coef
+	Sound.play("explosion", -12.0)
 
 
 ## 小首领「潮主」· 战吼：半径内的小怪集体加速，逼玩家先处理首领
@@ -450,6 +717,13 @@ func _on_half_hp() -> void:
 		Fx.damage_number(parent, global_position + Vector3(0.0, 3.0, 0.0), "暴雪", Color(0.70, 0.92, 1.0), true)
 		Sound.play("wave")
 		_summon_guards(int(EnemyData.SNOWBALL_SUMMON), Kind.FROSTLING)
+	elif kind == Kind.PINELORD:
+		# 霜松「扎根」：抖落一圈雪 + 叫 2 只霜崽，而不是通用小兵 —— 冰原主题要统一
+		Fx.flash(parent, global_position + Vector3(0.0, 1.6, 0.0), Color(0.55, 0.92, 0.70), 2.0, 0.45)
+		Fx.ring(parent, global_position, Color(0.42, 0.82, 0.55), 3.4, 0.6)
+		Fx.damage_number(parent, global_position + Vector3(0.0, 2.6, 0.0), "扎根", Color(0.62, 0.94, 0.74), false)
+		Sound.play("wave")
+		_summon_guards(int(EnemyData.PINE_SUMMON), Kind.FROSTLING)
 	else:
 		Fx.ring(parent, global_position, Color(1.0, 0.55, 0.25), 2.6, 0.5)
 		Fx.damage_number(parent, global_position + Vector3(0.0, 1.8, 0.0), "集结", Color(1.0, 0.72, 0.35), false)
@@ -484,14 +758,17 @@ func _build(d: Dictionary) -> void:
 	var col: Color = d["color"]
 	var s: float = float(d["size"])
 
-	# 霜崽用原画精灵（billboard 方片），贴图没放进来时回退到程序化几何，工程永远能跑。
-	# 雪人王是**真 3D 造型**（SnowkingModel），不再用那张像素原画 —— 首领在场上会被绕着看，
-	# 一张正对镜头的方片一转就露馅；3D 造型还能做出王冠 / 冰甲 / 蓄力雪球这些原画没有的改造。
+	# 霜崽 / 雪人王都是**真 3D 造型**（FrostlingModel / SnowkingModel），不再用原画精灵：
+	# billboard 方片在能绕视角的 3D 场景里一转就露馅；造型也刻意改造过，不和原画一一对应。
 	var sprite_ok := false
 	if kind == Kind.FROSTLING:
-		sprite_ok = _build_sprite_body(s, "enemy_%s" % slot_suffix(), bool(d.get("pixel", false)))
+		_build_frostling_body(s)
+		sprite_ok = true
 	elif kind == Kind.SNOWKING:
 		_build_snowking_body(s)
+		sprite_ok = true
+	elif kind == Kind.PINELORD:
+		_build_pinelord_body(s)
 		sprite_ok = true
 
 	# 优先用 res://models/enemies/enemy_<类型>.glb（放了模型就不再用程序化几何）
@@ -550,9 +827,9 @@ func _build(d: Dictionary) -> void:
 		bar_w = BAR_WIDTH * 1.5
 	# 血条离地高度跟着体型走：身体顶面大约在 0.85~1.03 倍体型处，
 	# 1.05*s+0.25 让大小怪的血条都贴着脑袋，不会因为放大而飘到半空。
-	# 贴图精灵（霜崽）/ 3D 造型（雪人王）的头顶就是 _body_h，用同一套公式会飘出去一截。
+	# 3D 造型（霜崽 / 雪人王 / 霜松）的头顶就是 _body_h，用同一套公式会飘出去一截。
 	var bar_y := 1.05 * s + 0.25
-	if kind == Kind.FROSTLING or kind == Kind.SNOWKING:
+	if kind == Kind.FROSTLING or kind == Kind.SNOWKING or kind == Kind.PINELORD:
 		bar_y = _body_h + 0.20
 	_build_bar(bar_y, bar_w)
 
@@ -570,27 +847,47 @@ func _build(d: Dictionary) -> void:
 	elif kind == Kind.MINI_BOSS:
 		_build_boss_ring(s, Color(1.0, 0.62, 0.22))
 		_build_boss_marker(s, Color(1.0, 0.64, 0.24), "MINI BOSS")
+	elif kind == Kind.PINELORD:
+		# 霜松：松绿光环 + 头顶「MINI BOSS」，和通用小首领的橙环区分开
+		_build_boss_ring(s, Color(0.36, 0.86, 0.52))
+		_build_boss_marker(s, Color(0.44, 0.94, 0.60), "MINI BOSS")
 	if not elites.is_empty():
 		_build_elite_ring(s)
 
 
-## 雪人王：程序化 3D 造型（组成见 SnowkingModel）。
-## 主雪体材质交给 _mat，减速 / 受击闪白 / 半血「暴雪」沿用同一套染色逻辑；
-## _body_h 必须用实测包围盒，血条和雪球的出手高度都挂在它上面。
+## 雪人王：程序化 3D 造型（组成见 SnowkingModel）
 func _build_snowking_body(s: float) -> void:
-	var model := SnowkingModel.build(s)
+	_attach_model_body(SnowkingModel.build(s), 1.42 * s)
+
+
+## 霜崽：程序化 3D 造型（组成见 FrostlingModel）。
+## 它要沉到冰面下游泳，_body_h 尤其不能估错 —— 下沉量就是 _body_h + 0.25。
+func _build_frostling_body(s: float) -> void:
+	_attach_model_body(FrostlingModel.build(s), 0.86 * s)
+
+
+## 霜松（小 boss）：程序化 3D 造型（组成见 PineBossModel）
+func _build_pinelord_body(s: float) -> void:
+	_attach_model_body(PineBossModel.build(s), 1.57 * s)
+
+
+## 把程序化 3D 造型挂到 _body 上：
+## 主材质交给 _mat（减速 / 中毒 / 受击染色都改这一个），高度用实测包围盒（血条、游泳下沉都靠它）。
+func _attach_model_body(model: Node3D, fallback_h: float) -> void:
 	var bm = model.get_meta("body_mat", null)
 	if bm is StandardMaterial3D:
 		_mat = bm as StandardMaterial3D
 		_tint_base = _mat.albedo_color
 	_body_h = ModelLib.height_of(model)
 	if _body_h <= 0.01:
-		_body_h = 1.42 * s
+		_body_h = fallback_h
 	_body.add_child(model)
 
 
 ## 贴图精灵外观：把 res://textures/<slot>.png 贴在一张永远正对镜头的方片上。
-## 为什么用方片：这类原画是「已经打好光的成品精灵」（霜崽是手绘），
+## 目前没有敌人走这条路（霜崽 / 雪人王都已改成 3D 造型），留作「塞一张原画就能换皮」的备用入口：
+## 想临时试某张图，在 _build() 里加 `_build_sprite_body(...)` 分支即可。
+## 为什么用方片：这类原画是「已经打好光的成品精灵」，
 ## 贴到球 / 立方体上会被二次打光、边缘糊成一团；billboard 方片能原样还原，而且只有 1 个 draw call。
 ## 透明用 ALPHA_SCISSOR 而不是 ALPHA：半透明材质会被排进透明队列、不写深度，
 ## 下沉到冰面下的身体会从冰面里透出来（碎冰者那套「完全沉下去」的观感就毁了）。
@@ -669,6 +966,8 @@ func slot_suffix() -> String:
 			return "boss"
 		Kind.SNOWKING:
 			return "snowking"
+		Kind.PINELORD:
+			return "pinelord"
 		Kind.MINI_BOSS:
 			return "miniboss"
 		Kind.FLYER:
@@ -689,16 +988,31 @@ func slot_suffix() -> String:
 			return "grunt"
 
 
+## 共享 Shader 的懒加载：第一次用到时才编译，之后所有怪都复用同一份
+static func _shared_bar_shader() -> Shader:
+	if _bar_shader == null:
+		var sh := Shader.new()
+		sh.code = "\n".join(BAR_SHADER)
+		_bar_shader = sh
+	return _bar_shader
+
+
+static func _shared_shield_shader() -> Shader:
+	if _shield_shader == null:
+		var sh := Shader.new()
+		sh.code = "\n".join(SHIELD_SHADER)
+		_shield_shader = sh
+	return _shield_shader
+
+
 func _build_bar(y: float, width: float = BAR_WIDTH) -> void:
 	_bar_root = Node3D.new()
 	_bar_root.name = "HealthBar"
 	_bar_root.position.y = y
 	add_child(_bar_root)
 
-	var sh := Shader.new()
-	sh.code = "\n".join(BAR_SHADER)
 	_bar_mat = ShaderMaterial.new()
-	_bar_mat.shader = sh
+	_bar_mat.shader = _shared_bar_shader()
 
 	# 外框 + 底槽 + 填充全部由着色器一次画完，所以只要一个 quad
 	var quad := MeshInstance3D.new()
@@ -854,6 +1168,9 @@ func _process(delta: float) -> void:
 		_animate_wake(delta)
 	if not GameState.running or _dying:
 		return
+	# 被雪人王的滚雪球卷着：收在球里，等球炸开再继续走
+	if _rolled:
+		return
 
 	if slow_timer > 0.0:
 		slow_timer -= delta
@@ -876,6 +1193,9 @@ func _process(delta: float) -> void:
 	_tick_haste(delta)
 	if is_boss():
 		_tick_boss_skill(delta)
+	# 滚雪球是雪人王独有的额外技能，和「扔雪球 / 暴雪」各自计时，互不占用冷却
+	if kind == Kind.SNOWKING:
+		_tick_roll(delta)
 	_tick_ice_armor(delta)
 
 	if heal > 0.0:
@@ -943,6 +1263,16 @@ func _process(delta: float) -> void:
 		_vuln_timer -= delta
 		if _vuln_timer <= 0.0:
 			_vuln = 0.0
+
+	# 入口驻守（雪人王）：蹲在洞口不动，但技能照放 —— 滚雪球卷的就是这半波刚出门的杂兵。
+	# 必须放在技能 tick 之后、位移之前：卡在技能前面它就不会聚球，卡在位移之后它已经走了。
+	if _hold_timer > 0.0:
+		_hold_timer -= delta
+		_hold_t += delta
+		if _hold_timer > 0.0:
+			# 站着也要有点活气：轻轻起伏，否则看起来像卡住了
+			_body.position.y = sin(_hold_t * 2.4) * 0.05
+			return
 
 	if flying:
 		# 飞行怪：直线飞向基地，无视地形阻挡
@@ -1244,10 +1574,8 @@ func _build_shield_dome() -> void:
 	sm.radial_segments = 18
 	sm.rings = 10
 	mi.mesh = sm
-	var sh := Shader.new()
-	sh.code = "\n".join(SHIELD_SHADER)
 	_shield_mat = ShaderMaterial.new()
-	_shield_mat.shader = sh
+	_shield_mat.shader = _shared_shield_shader()
 	mi.material_override = _shield_mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	mi.position.y = 0.55 * s
@@ -1306,7 +1634,7 @@ func _shield_hit_fx(element: String, dmg: float) -> void:
 ## 火属性削冰甲时 ×EnemyData.ICE_FIRE_MULT，其它属性 1 倍。
 func take_damage(amount: float, crit: bool = false, show_number: bool = true,
 		element: String = "") -> void:
-	if _dying:
+	if _dying or _rolled:
 		return
 	# 破甲先扣护甲，易伤再放大伤害：两个都只影响「这一次命中之后」的攻击
 	var eff_armor := maxf(armor - _armor_break, 0.0)
@@ -1481,9 +1809,37 @@ func apply_vuln(amount: float, duration: float) -> void:
 	_vuln_timer = maxf(_vuln_timer, duration)
 
 
-## 塔锁定目标时判断：隐身怪在隐身阶段不可被直接锁定
+## 塔锁定目标时判断：隐身怪在隐身阶段、被雪球卷着的怪都不可被直接锁定
 func is_hidden() -> bool:
-	return cloak and _cloaked
+	return (cloak and _cloaked) or _rolled
+
+
+## 被雪人王的滚雪球卷进球里：整只怪收起来，等雪球炸开再放出来
+func become_rolled() -> void:
+	if _rolled or _dying:
+		return
+	_rolled = true
+	visible = false
+
+
+## 雪球炸开：显形、落到落点，从「剩余路点」里最近的一个继续走
+func release_rolled(pos: Vector3) -> void:
+	if not _rolled:
+		return
+	_rolled = false
+	visible = true
+	global_position = pos
+	if path_world.is_empty():
+		return
+	# 只在剩余路点里找最近的：不能倒退，也不许一步跳到终点（否则等于白送一只漏怪）
+	var best := path_idx
+	var best_d := INF
+	for j in range(path_idx, path_world.size()):
+		var d: float = path_world[j].distance_squared_to(pos)
+		if d < best_d:
+			best_d = d
+			best = j
+	path_idx = clampi(best, path_idx, maxi(path_world.size() - 2, path_idx))
 
 
 func _update_tint() -> void:
@@ -1569,6 +1925,9 @@ func _face_bar_to_camera() -> void:
 
 func _die() -> void:
 	_dying = true
+	# 雪人王死在滚雪球途中：先把球里的怪放出来，否则它们会永远卡在无敌状态
+	if _roll_state != 0:
+		_release_roll()
 	GameState.add_gold(reward)
 	GameState.on_kill()
 	remove_from_group("enemies")

@@ -178,24 +178,40 @@ static func _meshes(n: Node) -> Array[MeshInstance3D]:
 	return out
 
 
-## 同屏飘字上限：每个飘字要建 Label3D + Tween + 字体渲染，无节制会很吃 CPU
+## 同屏飘字上限：每个飘字要建 Label3D + Tween + 字体渲染，无节制会很吃 CPU。
+## 计数挂在 parent 的 meta 上，**不是静态变量**：
+## 旧的静态计数有个隐患 —— tween 一旦被打断（节点被外部释放 / 树暂停后被丢弃），
+## 那次回调就不会执行，计数只增不减，之后整局都再也不飘字（长时间运行后「伤害数字消失」）。
+## 挂在 parent 上的计数会随场景一起消失，天然不会残留。
 const MAX_NUMBERS := 14
-static var _live_numbers := 0
+const NUM_META := "dmg_num_live"
 
 
-## 重新开始（场景重载）时调用：飘字节点会随旧场景一起被释放，
-## 静态计数必须手动归零，否则重开一局后可能永远不再飘字。
+## 重新开始（场景重载）时调用。计数已经跟着 parent 走了，这里只是保留旧调用点。
 static func reset_counters() -> void:
-	_live_numbers = 0
+	pass
+
+
+## 参数故意不标 Node：回调里拿到的可能是「已释放的实例」，标了类型会在传参时报错
+static func _num_live(parent) -> int:
+	if parent == null or not is_instance_valid(parent):
+		return 0
+	return int(parent.get_meta(NUM_META, 0))
+
+
+static func _num_add(parent, d: int) -> void:
+	if parent == null or not is_instance_valid(parent):
+		return
+	parent.set_meta(NUM_META, maxi(_num_live(parent) + d, 0))
 
 
 ## 3D 伤害 / 治疗飘字：用 Label3D 始终面向镜头，向上飘并淡出
 static func damage_number(parent: Node, pos: Vector3, text: String, color: Color, crit: bool = false) -> void:
 	if parent == null:
 		return
-	if _live_numbers >= MAX_NUMBERS:
+	if _num_live(parent) >= MAX_NUMBERS:
 		return
-	_live_numbers += 1
+	_num_add(parent, 1)
 	var l := Label3D.new()
 	l.text = text
 	l.font_size = 48 if crit else 30
@@ -210,7 +226,8 @@ static func damage_number(parent: Node, pos: Vector3, text: String, color: Color
 	tw.set_parallel(true)
 	tw.tween_property(l, "position:y", l.position.y + 1.2, 0.55)
 	tw.tween_property(l, "modulate:a", 0.0, 0.55)
+	l.set_meta("dmg_owner", parent)   # 回调里要还计数，防止 parent 已释放时踩空
 	tw.chain().tween_callback(func():
-		_live_numbers = maxi(_live_numbers - 1, 0)
+		_num_add(l.get_meta("dmg_owner"), -1)
 		l.queue_free()
 	)
